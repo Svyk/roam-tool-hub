@@ -173,7 +173,8 @@ export function createChatBridge({
       tools: catalog.tools.length,
       extensions: catalog.extensions.length,
       registries: state.registries.size,
-      stats: { ...stats },
+      // The live counters, not a copy: they keep moving between status changes.
+      stats,
       updatedAt: Date.now(),
     };
     try {
