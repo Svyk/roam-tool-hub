@@ -275,10 +275,36 @@ test("above 20 enabled extensions writes grouped counts and points at list_exten
   ]);
 });
 
-test("sanitizeRoamMarkup neutralizes macros, tags, refs, and attributes", () => {
-  const clean = sanitizeRoamMarkup("Plot {{plot}} #TimeBlock HQ:: [[Page]] ((abc123456))");
-  assert.doesNotMatch(clean, /\{\{|\[\[|\(\(|::/);
+test("sanitizeRoamMarkup neutralizes macros, tags, refs, repeated delimiters, backticks, and attributes", () => {
+  const clean = sanitizeRoamMarkup("Plot {{plot}} {{{nested}}} #TimeBlock HQ:: ::: [[Page]] [[[Triple]]] ((abc123456)) (((deep))) `code`");
+  assert.doesNotMatch(clean, /\{\{|\}\}|\[\[|\]\]|\(\(|\)\)|::/);
   assert.match(clean, /`#TimeBlock`/);
+  assert.doesNotMatch(clean, /`code`/);
+});
+
+test("syncGuidelinesIndex returns page-create-failed instead of writing to a phantom uid if page.create fails", async () => {
+  const api = makeFakeExtensionAPI({ [SETTING_IDS.guidelinesEnabled]: true });
+  let blockCreates = 0;
+  const failingRoam = {
+    graph: { name: "Readwisenotes" },
+    util: { generateUID: () => "phantom-1" },
+    data: {
+      pull: () => null,
+      page: { create: async () => { throw new Error("read-only graph"); } },
+      block: {
+        create: async () => { blockCreates += 1; },
+        update: async () => {},
+        delete: async () => {},
+      },
+    },
+  };
+  const res = await syncGuidelinesIndex({
+    extensionAPI: api,
+    roamAlphaAPI: failingRoam,
+    getRegistry: () => ({}),
+  });
+  assert.equal(res.status, "page-create-failed");
+  assert.equal(blockCreates, 0);
 });
 
 test("boot sync (allowShrink: false) preserves populated index when extensions have not loaded yet, and read-only canSet refuses writes", async () => {

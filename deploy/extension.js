@@ -1,7 +1,7 @@
-/* Tool Hub v0.2.0 | MIT | generated; edit src/ */
+/* Tool Hub v0.3.0 | MIT | generated; edit src/ */
 
 // src/constants.js
-var HUB_VERSION = "0.2.0";
+var HUB_VERSION = "0.3.0";
 var LOG_PREFIX = "[roam-tool-hub]";
 var RUNTIME_VERSION_KEY = "__ROAM_TOOL_HUB_VERSION";
 var MAX_TOOL_DESCRIPTION_CHARS = 300;
@@ -12,16 +12,10 @@ var MAX_FIND_LIMIT = 100;
 var MAX_RESULT_CHARS = 4e4;
 var GUIDELINES_PAGE_TITLE = "roam/agent guidelines";
 var GUIDELINES_SUMMARY_THRESHOLD = 20;
-var INBOX_PAGE_TITLE = "roam/tool-hub/inbox";
-var INBOX_CALL_PREFIX = "rth-call";
-var INBOX_RESULT_PREFIX = "rth-result";
-var MAX_INBOX_HISTORY = 10;
-var MAX_INBOX_RESULT_CHARS = 35e3;
 var SETTING_IDS = Object.freeze({
   refreshButton: "refresh-extensions",
   guidelinesEnabled: "guidelines-index-enabled",
-  guidelinesBlockUid: "guidelines-block-uid",
-  cmdJBridgeEnabled: "cmd-j-bridge-enabled"
+  guidelinesBlockUid: "guidelines-block-uid"
 });
 
 // src/registry.js
@@ -173,10 +167,6 @@ function isGuidelinesIndexEnabled(extensionAPI) {
   const value = extensionAPI?.settings?.get?.(SETTING_IDS.guidelinesEnabled);
   return value === true;
 }
-function isCmdJBridgeEnabled(extensionAPI) {
-  const value = extensionAPI?.settings?.get?.(SETTING_IDS.cmdJBridgeEnabled);
-  return value === true;
-}
 function getGuidelinesBlockUid(extensionAPI) {
   const value = extensionAPI?.settings?.get?.(SETTING_IDS.guidelinesBlockUid);
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -189,9 +179,6 @@ async function seedExtensionDefaults(extensionAPI, extensions) {
   if (extensionAPI?.settings?.canSet === false) return;
   if (extensionAPI.settings.get(SETTING_IDS.guidelinesEnabled) == null) {
     await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, false);
-  }
-  if (extensionAPI.settings.get(SETTING_IDS.cmdJBridgeEnabled) == null) {
-    await extensionAPI.settings.set(SETTING_IDS.cmdJBridgeEnabled, false);
   }
   for (const ext of extensions) {
     const enabledId = extensionEnabledSettingId(ext.key);
@@ -208,8 +195,7 @@ function createSettingsPanel({
   extensions = [],
   onRefresh,
   onToggleExtension,
-  onToggleGuidelines,
-  onToggleCmdJBridge
+  onToggleGuidelines
 } = {}) {
   const settings = [
     {
@@ -227,22 +213,11 @@ function createSettingsPanel({
     {
       id: SETTING_IDS.guidelinesEnabled,
       name: "Publish index on roam/agent guidelines",
-      description: "Maintain one generated Tool Hub summary block on [[roam/agent guidelines]]. Turning this off removes that block.",
+      description: "Maintain one generated Tool Hub summary block on [[roam/agent guidelines]] for Local MCP clients (scoped so built-in Cmd-J ignores it). Click Refresh to sync late-loading extensions. Turning this off removes that block.",
       action: {
         type: "switch",
         onChange: (event) => {
           void onToggleGuidelines?.(Boolean(event?.target?.checked));
-        }
-      }
-    },
-    {
-      id: SETTING_IDS.cmdJBridgeEnabled,
-      name: "Enable Cmd-J inbox bridge",
-      description: "Watch [[roam/tool-hub/inbox]] so Roam's built-in Cmd-J chat can invoke Tool Hub via create_block + get_block (respects all switches below).",
-      action: {
-        type: "switch",
-        onChange: (event) => {
-          void onToggleCmdJBridge?.(Boolean(event?.target?.checked));
         }
       }
     }
@@ -279,7 +254,7 @@ function createSettingsPanel({
 }
 
 // src/guidelines-index.js
-var GUIDELINES_HEADING = "**Tool Hub** (generated index — managed by Tool Hub; edit settings instead of this block)";
+var GUIDELINES_HEADING = "**Tool Hub** (Local MCP call_extension_tool only — in built-in Cmd-J chat, ignore this section and use normal Roam blocks/tables directly)";
 var PAGE_PULL_PATTERN = "[:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order]}]}]";
 var BLOCK_PULL_PATTERN = "[:block/uid :block/string {:block/page [:node/title :block/uid]} {:block/children [:block/uid :block/string :block/order]}]";
 function sortByOrder(children) {
@@ -299,9 +274,14 @@ function generateUid(roamAlphaAPI) {
   return `rth${Math.random().toString(36).slice(2, 10)}`;
 }
 function sanitizeRoamMarkup(text) {
-  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-  return clean.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }").replace(/\[\[/g, "[ [").replace(/\]\]/g, "] ]").replace(/\(\(/g, "( (").replace(/\)\)/g, ") )").replace(/::/g, ":").replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
+  let out = String(text ?? "").replace(/\s+/g, " ").replace(/`/g, "'").trim();
+  if (!out) return "";
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = out.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }").replace(/\[\[/g, "[ [").replace(/\]\]/g, "] ]").replace(/\(\(/g, "( (").replace(/\)\)/g, ") )").replace(/::/g, ":");
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
 }
 function pullWithReceiver(roamAlphaAPI, pattern, entity) {
   const pull = roamAlphaAPI?.data?.pull || roamAlphaAPI?.pull;
@@ -341,24 +321,14 @@ async function withGuidelinesLock(roamAlphaAPI, fn) {
   const lockName = `roam-tool-hub:guidelines:${graphName}`;
   return await locks.request(lockName, async () => await fn());
 }
-function buildCmdJBridgeInstruction(inboxPageUid) {
-  if (!inboxPageUid) return null;
-  const safeUid = sanitizeRoamMarkup(inboxPageUid);
-  return `Built-in Cmd-J chat bridge (active): If \`call_extension_tool\` is not in your tool list, call \`create_block\` on page \`${INBOX_PAGE_TITLE}\` (parent uid \`${safeUid}\`) with text \`${INBOX_CALL_PREFIX} {"action":"find_tools","extension":"roam-grid"}\` (actions: \`list_extensions\`, \`find_tools\`, \`describe_tools\`, \`run_read_tool\`, \`run_tool\`), then call \`get_block\` on the created block uid to read the \`${INBOX_RESULT_PREFIX}\` child block.`;
-}
 function buildGuidelinesIndexModel({
   extensions = [],
-  isWriteEnabled = () => false,
-  inboxPageUid = null
+  isWriteEnabled = () => false
 } = {}) {
-  const prefixLines = [];
-  const bridgeLine = buildCmdJBridgeInstruction(inboxPageUid);
-  if (bridgeLine) prefixLines.push(bridgeLine);
   if (extensions.length === 0) {
     return {
       heading: GUIDELINES_HEADING,
       children: [
-        ...prefixLines,
         "No extensions currently enabled in Tool Hub. Call list_extensions to check live tools."
       ]
     };
@@ -372,7 +342,7 @@ function buildGuidelinesIndexModel({
       const safeSummary = sanitizeRoamMarkup(ext.summary);
       return `**${safeName}** (\`${safeKey}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${safeSummary}`;
     });
-    return { heading: GUIDELINES_HEADING, children: [...prefixLines, ...children2] };
+    return { heading: GUIDELINES_HEADING, children: children2 };
   }
   const groups = /* @__PURE__ */ new Map();
   let totalTools = 0;
@@ -397,15 +367,14 @@ function buildGuidelinesIndexModel({
   children.push(
     `Total: ${extensions.length} enabled extensions (${totalTools} tools). Call list_extensions to browse them.`
   );
-  return { heading: GUIDELINES_HEADING, children: [...prefixLines, ...children] };
+  return { heading: GUIDELINES_HEADING, children };
 }
 async function syncGuidelinesIndex({
   extensionAPI,
   roamAlphaAPI = defaultRoamApiGetter(),
   getRegistry = defaultRegistryGetter,
   forceEnabled,
-  allowShrink = true,
-  inboxPageUid = null
+  allowShrink = true
 } = {}) {
   const enabled = forceEnabled !== void 0 ? Boolean(forceEnabled) : isGuidelinesIndexEnabled(extensionAPI);
   if (!enabled) {
@@ -425,8 +394,7 @@ async function syncGuidelinesIndex({
     const enabledExts = snapshot.extensions.filter((ext) => isExtensionEnabled(extensionAPI, ext.key));
     const model = buildGuidelinesIndexModel({
       extensions: enabledExts,
-      isWriteEnabled: (key) => isExtensionWriteEnabled(extensionAPI, key),
-      inboxPageUid
+      isWriteEnabled: (key) => isExtensionWriteEnabled(extensionAPI, key)
     });
     let page = pullGuidelinesPage(roamAlphaAPI);
     let pageUid = page?.[":block/uid"] || null;
@@ -441,7 +409,10 @@ async function syncGuidelinesIndex({
       } catch {
       }
       page = pullGuidelinesPage(roamAlphaAPI);
-      pageUid = page?.[":block/uid"] || candidateUid;
+      pageUid = page?.[":block/uid"] || null;
+      if (!pageUid) {
+        return { status: "page-create-failed", writes };
+      }
     }
     const storedUid = getGuidelinesBlockUid(extensionAPI);
     const existingBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
@@ -542,27 +513,36 @@ function isPlainObject(value) {
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
-function deepEqual(a, b) {
+var MAX_VALIDATION_DEPTH = 64;
+function deepEqual(a, b, depth = 0, seenA = null) {
   if (a === b) return true;
   if (Number.isNaN(a) && Number.isNaN(b)) return true;
   if (a === null || b === null || typeof a !== typeof b) return false;
   if (typeof a !== "object") return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  if (Array.isArray(a)) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i += 1) {
-      if (!deepEqual(a[i], b[i])) return false;
+  if (depth >= MAX_VALIDATION_DEPTH) return false;
+  const active = seenA || /* @__PURE__ */ new Set();
+  if (active.has(a)) return false;
+  active.add(a);
+  try {
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i += 1) {
+        if (!deepEqual(a[i], b[i], depth + 1, active)) return false;
+      }
+      return true;
+    }
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (const key of keysA) {
+      if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+      if (!deepEqual(a[key], b[key], depth + 1, active)) return false;
     }
     return true;
+  } finally {
+    active.delete(a);
   }
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  for (const key of keysA) {
-    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-    if (!deepEqual(a[key], b[key])) return false;
-  }
-  return true;
 }
 function matchesSingleType(value, expectedType) {
   switch (expectedType) {
@@ -593,92 +573,104 @@ function describeType(value) {
   }
   return typeof value;
 }
-function validateNode(value, schema, path, errors) {
+function validateNode(value, schema, path, errors, visitingSchemas, depth) {
   if (schema === void 0 || schema === null || schema === true) return;
   if (schema === false) {
     errors.push(`${path}: value is disallowed by schema`);
     return;
   }
   if (typeof schema !== "object" || Array.isArray(schema)) return;
-  if (schema.type !== void 0) {
-    const allowed = Array.isArray(schema.type) ? schema.type : [schema.type];
-    const ok = allowed.some((typeName) => matchesSingleType(value, typeName));
-    if (!ok) {
-      errors.push(`${path}: expected ${allowed.join(" or ")}, got ${describeType(value)}`);
-      return;
+  if (depth >= MAX_VALIDATION_DEPTH || visitingSchemas.has(schema)) return;
+  visitingSchemas.add(schema);
+  try {
+    if (schema.type !== void 0) {
+      const allowed = Array.isArray(schema.type) ? schema.type : [schema.type];
+      const ok = allowed.some((typeName) => matchesSingleType(value, typeName));
+      if (!ok) {
+        errors.push(`${path}: expected ${allowed.join(" or ")}, got ${describeType(value)}`);
+        return;
+      }
     }
-  }
-  if (Array.isArray(schema.enum)) {
-    const inEnum = schema.enum.some((candidate) => deepEqual(value, candidate));
-    if (!inEnum) {
-      const rendered = schema.enum.map((item) => JSON.stringify(item)).join(", ");
-      errors.push(`${path}: must be one of [${rendered}]`);
+    if (Array.isArray(schema.enum)) {
+      const inEnum = schema.enum.some((candidate) => deepEqual(value, candidate));
+      if (!inEnum) {
+        const rendered = schema.enum.map((item) => {
+          try {
+            return JSON.stringify(item);
+          } catch {
+            return String(item);
+          }
+        }).join(", ");
+        errors.push(`${path}: must be one of [${rendered}]`);
+      }
     }
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    if (typeof schema.minimum === "number" && value < schema.minimum) {
-      errors.push(`${path}: must be >= ${schema.minimum}`);
+    if (typeof value === "number" && Number.isFinite(value)) {
+      if (typeof schema.minimum === "number" && value < schema.minimum) {
+        errors.push(`${path}: must be >= ${schema.minimum}`);
+      }
+      if (typeof schema.maximum === "number" && value > schema.maximum) {
+        errors.push(`${path}: must be <= ${schema.maximum}`);
+      }
     }
-    if (typeof schema.maximum === "number" && value > schema.maximum) {
-      errors.push(`${path}: must be <= ${schema.maximum}`);
+    if (typeof value === "string") {
+      const length = [...value].length;
+      if (typeof schema.minLength === "number" && length < schema.minLength) {
+        errors.push(`${path}: length must be >= ${schema.minLength}`);
+      }
+      if (typeof schema.maxLength === "number" && length > schema.maxLength) {
+        errors.push(`${path}: length must be <= ${schema.maxLength}`);
+      }
     }
-  }
-  if (typeof value === "string") {
-    const length = [...value].length;
-    if (typeof schema.minLength === "number" && length < schema.minLength) {
-      errors.push(`${path}: length must be >= ${schema.minLength}`);
-    }
-    if (typeof schema.maxLength === "number" && length > schema.maxLength) {
-      errors.push(`${path}: length must be <= ${schema.maxLength}`);
-    }
-  }
-  if (Array.isArray(value)) {
-    if (typeof schema.minItems === "number" && value.length < schema.minItems) {
-      errors.push(`${path}: must have at least ${schema.minItems} item(s)`);
-    }
-    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) {
-      errors.push(`${path}: must have at most ${schema.maxItems} item(s)`);
-    }
-    if (schema.items !== void 0) {
-      if (Array.isArray(schema.items)) {
-        const limit = Math.min(value.length, schema.items.length);
-        for (let i = 0; i < limit; i += 1) {
-          validateNode(value[i], schema.items[i], `${path}[${i}]`, errors);
-        }
-      } else if (typeof schema.items === "object" || typeof schema.items === "boolean") {
-        for (let i = 0; i < value.length; i += 1) {
-          validateNode(value[i], schema.items, `${path}[${i}]`, errors);
+    if (Array.isArray(value)) {
+      if (typeof schema.minItems === "number" && value.length < schema.minItems) {
+        errors.push(`${path}: must have at least ${schema.minItems} item(s)`);
+      }
+      if (typeof schema.maxItems === "number" && value.length > schema.maxItems) {
+        errors.push(`${path}: must have at most ${schema.maxItems} item(s)`);
+      }
+      if (schema.items !== void 0) {
+        if (Array.isArray(schema.items)) {
+          const limit = Math.min(value.length, schema.items.length);
+          for (let i = 0; i < limit; i += 1) {
+            validateNode(value[i], schema.items[i], `${path}[${i}]`, errors, visitingSchemas, depth + 1);
+          }
+        } else if (typeof schema.items === "object" || typeof schema.items === "boolean") {
+          for (let i = 0; i < value.length; i += 1) {
+            validateNode(value[i], schema.items, `${path}[${i}]`, errors, visitingSchemas, depth + 1);
+          }
         }
       }
     }
-  }
-  if (isPlainObject(value)) {
-    if (Array.isArray(schema.required)) {
-      for (const reqKey of schema.required) {
-        if (typeof reqKey !== "string") continue;
-        if (!Object.prototype.hasOwnProperty.call(value, reqKey) || value[reqKey] === void 0) {
-          errors.push(`${path}: missing required property "${reqKey}"`);
+    if (isPlainObject(value)) {
+      if (Array.isArray(schema.required)) {
+        for (const reqKey of schema.required) {
+          if (typeof reqKey !== "string") continue;
+          if (!Object.prototype.hasOwnProperty.call(value, reqKey) || value[reqKey] === void 0) {
+            errors.push(`${path}: missing required property "${reqKey}"`);
+          }
+        }
+      }
+      const properties = isPlainObject(schema.properties) ? schema.properties : null;
+      const hasPatternProps = isPlainObject(schema.patternProperties) && Object.keys(schema.patternProperties).length > 0;
+      for (const [key, propValue] of Object.entries(value)) {
+        const childPath = path === "$" ? `$.${key}` : `${path}.${key}`;
+        if (properties && Object.prototype.hasOwnProperty.call(properties, key)) {
+          validateNode(propValue, properties[key], childPath, errors, visitingSchemas, depth + 1);
+        } else if (hasPatternProps) {
+        } else if (schema.additionalProperties === false) {
+          errors.push(`${childPath}: additional property is not allowed`);
+        } else if (isPlainObject(schema.additionalProperties)) {
+          validateNode(propValue, schema.additionalProperties, childPath, errors, visitingSchemas, depth + 1);
         }
       }
     }
-    const properties = isPlainObject(schema.properties) ? schema.properties : null;
-    const hasPatternProps = isPlainObject(schema.patternProperties) && Object.keys(schema.patternProperties).length > 0;
-    for (const [key, propValue] of Object.entries(value)) {
-      const childPath = path === "$" ? `$.${key}` : `${path}.${key}`;
-      if (properties && Object.prototype.hasOwnProperty.call(properties, key)) {
-        validateNode(propValue, properties[key], childPath, errors);
-      } else if (hasPatternProps) {
-      } else if (schema.additionalProperties === false) {
-        errors.push(`${childPath}: additional property is not allowed`);
-      } else if (isPlainObject(schema.additionalProperties)) {
-        validateNode(propValue, schema.additionalProperties, childPath, errors);
-      }
-    }
+  } finally {
+    visitingSchemas.delete(schema);
   }
 }
 function validateAgainstSchema(value, schema) {
   const errors = [];
-  validateNode(value, schema, "$", errors);
+  validateNode(value, schema, "$", errors, /* @__PURE__ */ new Set(), 0);
   return { valid: errors.length === 0, errors };
 }
 
@@ -699,6 +691,17 @@ function formatError(error) {
     return String(error);
   }
 }
+function buildTruncatedEnvelope(toolId, serialized, previewLen, maxChars) {
+  const preview = safeSlice(serialized, previewLen);
+  return {
+    tool: toolId,
+    truncated: true,
+    originalChars: serialized.length,
+    maxChars,
+    note: `Result truncated from ${serialized.length} to ${preview.length} characters.`,
+    resultPreview: preview
+  };
+}
 function finalizeToolResult(toolId, rawResult, maxChars = MAX_RESULT_CHARS) {
   const normalized = rawResult === void 0 ? null : rawResult;
   let serialized;
@@ -714,18 +717,28 @@ function finalizeToolResult(toolId, rawResult, maxChars = MAX_RESULT_CHARS) {
   if (serialized === void 0) {
     return { tool: toolId, result: null };
   }
-  if (serialized.length <= maxChars) {
-    return { tool: toolId, result: normalized };
+  const fullEnvelope = { tool: toolId, result: normalized };
+  if (JSON.stringify(fullEnvelope).length <= maxChars) {
+    return fullEnvelope;
   }
-  const preview = safeSlice(serialized, maxChars);
-  return {
-    tool: toolId,
-    truncated: true,
-    originalChars: serialized.length,
-    maxChars,
-    note: `Result truncated from ${serialized.length} to ${preview.length} characters.`,
-    resultPreview: preview
-  };
+  const emptyEnvelope = buildTruncatedEnvelope(toolId, serialized, 0, maxChars);
+  if (JSON.stringify(emptyEnvelope).length > maxChars) {
+    return buildTruncatedEnvelope(toolId, serialized, Math.max(0, maxChars), maxChars);
+  }
+  let lo = 0;
+  let hi = Math.min(serialized.length, maxChars);
+  let best = emptyEnvelope;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = buildTruncatedEnvelope(toolId, serialized, mid, maxChars);
+    if (JSON.stringify(candidate).length <= maxChars) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
 }
 async function invokeWithAttribution(tool, args, context) {
   let pending;
@@ -813,7 +826,16 @@ function createHubTools({
         error: `Invalid arguments for "${toolId}": args must be a plain object.`
       };
     }
-    const validation = validateAgainstSchema(toolArgs, tool.parameters);
+    let validation;
+    try {
+      validation = validateAgainstSchema(toolArgs, tool.parameters);
+    } catch (error) {
+      return {
+        tool: toolId,
+        code: "schema-error",
+        error: `Parameter schema for "${toolId}" could not be validated: ${formatError(error)}`
+      };
+    }
     if (!validation.valid) {
       return {
         tool: toolId,
@@ -1077,313 +1099,6 @@ function registerHubTools(extensionAPI, tools) {
   return removeRegistered;
 }
 
-// src/inbox-bridge.js
-var VALID_ACTIONS = new Set(HUB_TOOL_NAMES);
-var INBOX_WATCH_PATTERN = "[:block/uid {:block/children [:block/uid :block/string :block/order {:create/user [:user/uid]} {:block/children [:block/uid :block/string]}]}]";
-var REQUEST_PULL_PATTERN = "[:block/uid :block/string {:create/user [:user/uid]} {:block/children [:block/uid]}]";
-function defaultRoamApiGetter2() {
-  if (typeof globalThis.window !== "undefined" && globalThis.window.roamAlphaAPI) {
-    return globalThis.window.roamAlphaAPI;
-  }
-  return globalThis.roamAlphaAPI || null;
-}
-function pullWithReceiver2(roamAlphaAPI, pattern, entity) {
-  const pull = roamAlphaAPI?.data?.pull || roamAlphaAPI?.pull;
-  if (typeof pull !== "function") return null;
-  try {
-    return pull.call(roamAlphaAPI.data || roamAlphaAPI, pattern, entity);
-  } catch {
-    return null;
-  }
-}
-function generateUid2(roamAlphaAPI) {
-  if (typeof roamAlphaAPI?.util?.generateUID === "function") {
-    return roamAlphaAPI.util.generateUID();
-  }
-  return `rth${Math.random().toString(36).slice(2, 10)}`;
-}
-function unwrapBackticks(text) {
-  let s = String(text ?? "").trim();
-  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(s);
-  if (fenced) return fenced[1].trim();
-  if (s.startsWith("`") && s.endsWith("`") && s.length >= 2) {
-    s = s.slice(1, -1).trim();
-  }
-  return s;
-}
-function parseInboxCall(blockString) {
-  const unwrapped = unwrapBackticks(blockString);
-  const prefixMatch = /^rth-call(?:\s+([\s\S]*))?$/i.exec(unwrapped);
-  if (!prefixMatch) return { matched: false };
-  const rawBody = unwrapBackticks(prefixMatch[1] ?? "");
-  if (!rawBody) {
-    return {
-      matched: true,
-      error: `Missing JSON payload after "${INBOX_CALL_PREFIX}". Example: ${INBOX_CALL_PREFIX} {"action":"list_extensions"}`
-    };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(rawBody);
-  } catch (error) {
-    return {
-      matched: true,
-      error: `Invalid JSON in ${INBOX_CALL_PREFIX}: ${error?.message || String(error)}`
-    };
-  }
-  if (!isPlainObject(parsed)) {
-    return { matched: true, error: `${INBOX_CALL_PREFIX} payload must be a JSON object.` };
-  }
-  let action = typeof parsed.action === "string" ? parsed.action.trim() : "";
-  if (!action && typeof parsed.tool === "string" && parsed.tool.trim()) {
-    action = "run_tool";
-  }
-  if (!VALID_ACTIONS.has(action)) {
-    return {
-      matched: true,
-      error: `Invalid action "${action}". Must be one of: ${HUB_TOOL_NAMES.join(", ")}.`
-    };
-  }
-  const restKeys = Object.keys(parsed).filter((k) => k !== "action");
-  let args;
-  if (restKeys.length === 1 && restKeys[0] === "args" && isPlainObject(parsed.args)) {
-    args = parsed.args;
-  } else {
-    args = {};
-    for (const k of restKeys) {
-      args[k] = parsed[k];
-    }
-  }
-  return { matched: true, action, args };
-}
-function serializeInboxResult(payload, maxChars = MAX_INBOX_RESULT_CHARS) {
-  let json;
-  try {
-    json = JSON.stringify(payload === void 0 ? null : payload);
-  } catch (error) {
-    json = JSON.stringify({
-      code: "serialization-error",
-      error: `Result was not JSON-serializable: ${error?.message || String(error)}`
-    });
-  }
-  if (json.length <= maxChars) {
-    return `${INBOX_RESULT_PREFIX} ${json}`;
-  }
-  const previewBudget = Math.max(256, maxChars - 240);
-  const preview = safeSlice(json, previewBudget);
-  const wrapped = JSON.stringify({
-    truncated: true,
-    originalChars: json.length,
-    maxChars,
-    note: `Inbox result truncated from ${json.length} to ${preview.length} characters.`,
-    resultPreview: preview
-  });
-  return `${INBOX_RESULT_PREFIX} ${wrapped}`;
-}
-async function withInboxItemLock(roamAlphaAPI, blockUid, fn) {
-  const locks = globalThis.navigator?.locks;
-  if (typeof locks?.request !== "function") {
-    return await fn();
-  }
-  const graphName = roamAlphaAPI?.graph?.name || "default";
-  const lockName = `roam-tool-hub:inbox:${graphName}:${blockUid}`;
-  return await locks.request(lockName, { ifAvailable: true }, async (lock) => {
-    if (!lock) return { skipped: "locked" };
-    return await fn();
-  });
-}
-function extractUserUid(block) {
-  const user = block?.[":create/user"];
-  const obj = Array.isArray(user) ? user[0] : user;
-  const uid = obj?.[":user/uid"];
-  return typeof uid === "string" && uid.trim() ? uid.trim() : void 0;
-}
-function createInboxBridge({
-  roamAlphaAPI = defaultRoamApiGetter2(),
-  tools = [],
-  maxHistory = MAX_INBOX_HISTORY,
-  maxResultChars = MAX_INBOX_RESULT_CHARS
-} = {}) {
-  const toolsByName = new Map(tools.map((t) => [t.name, t]));
-  const seenUids = /* @__PURE__ */ new Set();
-  let active = false;
-  let disposed = false;
-  let inboxPageUid = null;
-  let watchEntity = null;
-  let watchCallback = null;
-  let startPromise = null;
-  const getRoam = () => roamAlphaAPI || defaultRoamApiGetter2();
-  async function ensureInboxPage(roam) {
-    let page = pullWithReceiver2(roam, "[:block/uid :node/title {:block/children [:block/uid]}]", [
-      ":node/title",
-      INBOX_PAGE_TITLE
-    ]);
-    if (page?.[":block/uid"]) return page;
-    const uid = generateUid2(roam);
-    try {
-      await roam.data.page.create({ page: { title: INBOX_PAGE_TITLE, uid } });
-    } catch {
-    }
-    page = pullWithReceiver2(roam, "[:block/uid :node/title {:block/children [:block/uid]}]", [
-      ":node/title",
-      INBOX_PAGE_TITLE
-    ]);
-    return page?.[":block/uid"] ? page : { ":block/uid": uid, ":block/children": [] };
-  }
-  async function pruneCompletedHistory(roam, pageUid) {
-    if (!pageUid || maxHistory <= 0) return;
-    const page = pullWithReceiver2(roam, INBOX_WATCH_PATTERN, [":block/uid", pageUid]);
-    const children = Array.isArray(page?.[":block/children"]) ? [...page[":block/children"]] : [];
-    const completedCalls = children.filter((child) => {
-      const str = child?.[":block/string"] || "";
-      const sub = child?.[":block/children"];
-      return parseInboxCall(str).matched && Array.isArray(sub) && sub.length > 0;
-    }).sort((a, b) => (a?.[":block/order"] ?? 0) - (b?.[":block/order"] ?? 0));
-    if (completedCalls.length <= maxHistory) return;
-    const toDelete = completedCalls.slice(0, completedCalls.length - maxHistory);
-    for (const old of toDelete) {
-      if (disposed || !active) break;
-      try {
-        await roam.data.block.delete({ block: { uid: old[":block/uid"] } });
-      } catch {
-      }
-    }
-  }
-  async function processBlock(block) {
-    if (disposed || !active) return;
-    const uid = block?.[":block/uid"];
-    if (typeof uid !== "string" || !uid || seenUids.has(uid)) return;
-    const existingChildren = block?.[":block/children"];
-    if (Array.isArray(existingChildren) && existingChildren.length > 0) {
-      seenUids.add(uid);
-      return;
-    }
-    const parsed = parseInboxCall(block?.[":block/string"] ?? "");
-    if (!parsed.matched) return;
-    seenUids.add(uid);
-    const roam = getRoam();
-    if (!roam?.data?.block?.create) return;
-    await withInboxItemLock(roam, uid, async () => {
-      if (disposed || !active) return;
-      const fresh = pullWithReceiver2(roam, REQUEST_PULL_PATTERN, [":block/uid", uid]);
-      if (!fresh?.[":block/uid"]) return;
-      if (Array.isArray(fresh[":block/children"]) && fresh[":block/children"].length > 0) return;
-      const freshParsed = parseInboxCall(fresh[":block/string"] ?? "");
-      if (!freshParsed.matched) return;
-      let output;
-      if (freshParsed.error) {
-        output = { code: "invalid-request", error: freshParsed.error };
-      } else {
-        const tool = toolsByName.get(freshParsed.action);
-        if (!tool) {
-          output = { code: "unknown-action", error: `Unknown Tool Hub action "${freshParsed.action}".` };
-        } else {
-          const tokenUserUid = extractUserUid(fresh) || extractUserUid(block);
-          const context = tokenUserUid ? { tokenUserUid } : {};
-          try {
-            output = await tool.handler(freshParsed.args, context);
-          } catch (error) {
-            output = {
-              code: "execution-error",
-              error: error instanceof Error ? error.message : String(error)
-            };
-          }
-        }
-      }
-      if (disposed) return;
-      const resultString = serializeInboxResult(output, maxResultChars);
-      try {
-        await roam.data.block.create({
-          location: { "parent-uid": uid, order: 0 },
-          block: { uid: generateUid2(roam), string: resultString }
-        });
-      } catch (error) {
-        console.warn(`${LOG_PREFIX} Failed writing inbox result for ${uid}`, error);
-        return;
-      }
-      await pruneCompletedHistory(roam, inboxPageUid);
-    });
-  }
-  function handleWatchUpdate(_before, after) {
-    if (disposed || !active) return;
-    const children = after?.[":block/children"];
-    if (!Array.isArray(children)) return;
-    for (const child of children) {
-      void processBlock(child).catch((error) => {
-        console.warn(`${LOG_PREFIX} Inbox bridge error`, error);
-      });
-    }
-  }
-  async function start() {
-    if (disposed) return { active: false, pageUid: null };
-    if (active && inboxPageUid) return { active: true, pageUid: inboxPageUid };
-    if (startPromise) return startPromise;
-    startPromise = (async () => {
-      const roam = getRoam();
-      if (!roam?.data?.addPullWatch || !roam?.data?.removePullWatch || !roam?.data?.page?.create || !roam?.data?.block?.create) {
-        return { active: false, pageUid: null };
-      }
-      const page = await ensureInboxPage(roam);
-      if (disposed) return { active: false, pageUid: null };
-      const pageUid = page?.[":block/uid"];
-      if (!pageUid) return { active: false, pageUid: null };
-      for (const child of page?.[":block/children"] || []) {
-        if (child?.[":block/uid"]) seenUids.add(child[":block/uid"]);
-      }
-      const entityStr = `[:block/uid "${pageUid}"]`;
-      const cb = (before, after) => handleWatchUpdate(before, after);
-      active = true;
-      inboxPageUid = pageUid;
-      watchEntity = entityStr;
-      watchCallback = cb;
-      await roam.data.addPullWatch(INBOX_WATCH_PATTERN, entityStr, cb);
-      if (disposed || !active) {
-        try {
-          await roam.data.removePullWatch(INBOX_WATCH_PATTERN, entityStr, cb);
-        } catch {
-        }
-        return { active: false, pageUid: null };
-      }
-      return { active: true, pageUid };
-    })().finally(() => {
-      startPromise = null;
-    });
-    return startPromise;
-  }
-  async function stop() {
-    if (!active && !watchCallback) return;
-    active = false;
-    const entity = watchEntity;
-    const cb = watchCallback;
-    watchEntity = null;
-    watchCallback = null;
-    const roam = getRoam();
-    if (entity && cb && typeof roam?.data?.removePullWatch === "function") {
-      try {
-        await roam.data.removePullWatch(INBOX_WATCH_PATTERN, entity, cb);
-      } catch (error) {
-        console.warn(`${LOG_PREFIX} Failed removing inbox pull watch`, error);
-      }
-    }
-  }
-  async function dispose() {
-    disposed = true;
-    await stop();
-  }
-  return {
-    start,
-    stop,
-    dispose,
-    processBlock,
-    get active() {
-      return active;
-    },
-    get pageUid() {
-      return inboxPageUid;
-    }
-  };
-}
-
 // src/lifecycle.js
 function isPromiseLike(value) {
   return value != null && typeof value.then === "function";
@@ -1508,38 +1223,38 @@ async function onload({ extensionAPI, extension } = {}) {
     let lastSignature = null;
     let panelRunning = false;
     let panelDirty = false;
-    let guidelinesRunning = false;
+    let guidelinesPromise = null;
     let guidelinesDirty = false;
     let guidelinesAllowShrink = false;
-    let inboxBridge = null;
-    const currentInboxPageUid = () => isCmdJBridgeEnabled(extensionAPI) && inboxBridge?.active ? inboxBridge.pageUid : null;
-    const drainGuidelinesQueue = async () => {
-      if (guidelinesRunning || lifecycle.disposed) return;
-      guidelinesRunning = true;
-      try {
-        while (guidelinesDirty && !lifecycle.disposed) {
-          const allowShrink = guidelinesAllowShrink;
-          guidelinesDirty = false;
-          guidelinesAllowShrink = false;
-          if (extensionAPI.settings?.canSet === false) continue;
-          try {
-            if (isGuidelinesIndexEnabled(extensionAPI)) {
-              await syncGuidelinesIndex({
-                extensionAPI,
-                getRegistry: defaultRegistryGetter,
-                allowShrink,
-                inboxPageUid: currentInboxPageUid()
-              });
-            } else {
-              await removeGuidelinesIndex({ extensionAPI });
+    const drainGuidelinesQueue = () => {
+      if (lifecycle.disposed) return Promise.resolve();
+      if (guidelinesPromise) return guidelinesPromise;
+      guidelinesPromise = (async () => {
+        try {
+          while (guidelinesDirty && !lifecycle.disposed) {
+            const allowShrink = guidelinesAllowShrink;
+            guidelinesDirty = false;
+            guidelinesAllowShrink = false;
+            if (extensionAPI.settings?.canSet === false) continue;
+            try {
+              if (isGuidelinesIndexEnabled(extensionAPI)) {
+                await syncGuidelinesIndex({
+                  extensionAPI,
+                  getRegistry: defaultRegistryGetter,
+                  allowShrink
+                });
+              } else {
+                await removeGuidelinesIndex({ extensionAPI });
+              }
+            } catch (error) {
+              console.warn(`${LOG_PREFIX} Guidelines index reconciliation failed`, error);
             }
-          } catch (error) {
-            console.warn(`${LOG_PREFIX} Guidelines index reconciliation failed`, error);
           }
+        } finally {
+          guidelinesPromise = null;
         }
-      } finally {
-        guidelinesRunning = false;
-      }
+      })();
+      return guidelinesPromise;
     };
     const scheduleGuidelinesReconcile = ({ allowShrink = true } = {}) => {
       if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return Promise.resolve();
@@ -1551,18 +1266,6 @@ async function onload({ extensionAPI, extension } = {}) {
       if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
       await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, checked);
       await scheduleGuidelinesReconcile({ allowShrink: true });
-    };
-    const handleToggleCmdJBridge = async (checked) => {
-      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
-      await extensionAPI.settings.set(SETTING_IDS.cmdJBridgeEnabled, checked);
-      if (checked) {
-        await inboxBridge?.start();
-      } else {
-        await inboxBridge?.stop();
-      }
-      if (isGuidelinesIndexEnabled(extensionAPI)) {
-        await scheduleGuidelinesReconcile({ allowShrink: true });
-      }
     };
     const handleToggleExtension = async (extKey, field, checked) => {
       if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
@@ -1593,8 +1296,7 @@ async function onload({ extensionAPI, extension } = {}) {
               extensions: snapshot.extensions,
               onRefresh: () => refreshSettingsPanel({ syncGuidelines: true, allowShrink: true }),
               onToggleExtension: handleToggleExtension,
-              onToggleGuidelines: handleToggleGuidelines,
-              onToggleCmdJBridge: handleToggleCmdJBridge
+              onToggleGuidelines: handleToggleGuidelines
             })
           );
         } while (panelDirty && !lifecycle.disposed);
@@ -1619,13 +1321,6 @@ async function onload({ extensionAPI, extension } = {}) {
       getRegistry: defaultRegistryGetter,
       onSnapshot
     });
-    inboxBridge = createInboxBridge({ tools });
-    lifecycle.add(() => inboxBridge.dispose());
-    if (isCmdJBridgeEnabled(extensionAPI)) {
-      await inboxBridge.start();
-      if (lifecycle.disposed) return async () => {
-      };
-    }
     await refreshSettingsPanel({ syncGuidelines: true, allowShrink: false });
     if (lifecycle.disposed) return async () => {
     };

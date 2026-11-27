@@ -4,6 +4,20 @@ All notable changes to this project follow [Keep a Changelog](https://keepachang
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
+### Removed
+
+- Removed the experimental `roam/tool-hub/inbox` Cmd-J bridge (`cmd-j-bridge-enabled`): Roam's built-in `Cmd-J` system prompt explicitly prohibits driving plugins or broadening tool policy from graph content, and an ambient-authority block bus opens cross-client/untrusted-block risks. Tool Hub runs cleanly through Roam's sanctioned Local MCP `call_extension_tool` surface.
+
+### Fixed
+
+- Scoped the optional `roam/agent guidelines` heading explicitly to Local MCP (`call_extension_tool`) clients so built-in `Cmd-J` chat ignores it instead of refusing to write native Roam tables or tasks.
+- `finalizeToolResult` now bounds the full JSON-serialized envelope (including escaped quotes in `resultPreview`) within `MAX_RESULT_CHARS` (`40,000`).
+- Added cycle and depth guards to `validateAgainstSchema` / `deepEqual`, plus a `try/catch` guard in `executeRegistryTool` so cyclic or malformed third-party schemas never overflow the stack.
+- Fixed `sanitizeRoamMarkup` to neutralize repeated Roam delimiters (`[[[`, `{{{`, `(((`, `:::`) and backticks cleanly.
+- Fixed `drainGuidelinesQueue` to return the in-flight promise when already running, and prevented `syncGuidelinesIndex` from falling back to a phantom page UID when `page.create` fails.
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

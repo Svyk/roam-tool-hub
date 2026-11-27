@@ -89,7 +89,7 @@ test("unknown keywords pass silently and boolean/null schemas behave as draft-07
   assert.equal(validateAgainstSchema({ anything: 1 }, false).valid, false);
 });
 
-test("handles -0 enum equality, rejects non-plain objects like Date, and respects patternProperties", () => {
+test("handles -0 enum equality, rejects non-plain objects like Date, respects patternProperties, and survives cyclic schemas", () => {
   assert.equal(validateAgainstSchema(-0, { enum: [0] }).valid, true);
   assert.equal(validateAgainstSchema(new Date(), { type: "object" }).valid, false);
   assert.equal(
@@ -99,4 +99,13 @@ test("handles -0 enum equality, rejects non-plain objects like Date, and respect
     ).valid,
     true,
   );
+
+  // Cyclic schema must not overflow the stack, while shared non-cyclic sibling refs still validate.
+  const cyclic = { type: "object", properties: {} };
+  cyclic.properties.child = cyclic;
+  assert.equal(validateAgainstSchema({ child: { child: {} } }, cyclic).valid, true);
+
+  const sharedProp = { type: "string", minLength: 2 };
+  const siblingSchema = { type: "object", properties: { a: sharedProp, b: sharedProp } };
+  assert.equal(validateAgainstSchema({ a: "ok", b: "x" }, siblingSchema).valid, false);
 });

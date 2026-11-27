@@ -270,8 +270,14 @@ test("catches sync throws and async rejections with tool id, and caps huge resul
   assert.equal(huge.truncated, true);
   assert.equal(huge.maxChars, 40_000);
   assert.ok(huge.originalChars > 50_000);
-  assert.equal(huge.resultPreview.length, 40_000);
+  assert.ok(huge.resultPreview.length > 35_000);
+  assert.ok(JSON.stringify(huge).length <= 40_000, `Expected serialized result <= 40000, got ${JSON.stringify(huge).length}`);
   assert.match(huge.note, /truncated/i);
+
+  // Quote-heavy JSON payload still fits the entire serialized envelope under maxChars.
+  const quoteHeavy = finalizeToolResult("ext/quotes", { blob: '"'.repeat(30_000) }, 40_000);
+  assert.equal(quoteHeavy.truncated, true);
+  assert.ok(JSON.stringify(quoteHeavy).length <= 40_000, `Expected quote-heavy envelope <= 40000, got ${JSON.stringify(quoteHeavy).length}`);
 
   // Circular objects do not crash finalizeToolResult.
   const circular = {};

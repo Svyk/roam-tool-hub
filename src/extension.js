@@ -1,14 +1,12 @@
 import { HUB_VERSION, LOG_PREFIX, RUNTIME_VERSION_KEY, SETTING_IDS } from "./constants.js";
 import { removeGuidelinesIndex, syncGuidelinesIndex } from "./guidelines-index.js";
 import { createHubTools, registerHubTools } from "./hub-tools.js";
-import { createInboxBridge } from "./inbox-bridge.js";
 import { createLifecycle } from "./lifecycle.js";
 import { defaultRegistryGetter, readRegistrySnapshot } from "./registry.js";
 import {
   createSettingsPanel,
   extensionEnabledSettingId,
   extensionWriteSettingId,
-  isCmdJBridgeEnabled,
   isGuidelinesIndexEnabled,
   seedExtensionDefaults,
 } from "./settings.js";
@@ -59,42 +57,39 @@ export async function onload({ extensionAPI, extension } = {}) {
     let lastSignature = null;
     let panelRunning = false;
     let panelDirty = false;
-    let guidelinesRunning = false;
+    let guidelinesPromise = null;
     let guidelinesDirty = false;
     let guidelinesAllowShrink = false;
-    let inboxBridge = null;
 
-    const currentInboxPageUid = () => (
-      isCmdJBridgeEnabled(extensionAPI) && inboxBridge?.active ? inboxBridge.pageUid : null
-    );
-
-    const drainGuidelinesQueue = async () => {
-      if (guidelinesRunning || lifecycle.disposed) return;
-      guidelinesRunning = true;
-      try {
-        while (guidelinesDirty && !lifecycle.disposed) {
-          const allowShrink = guidelinesAllowShrink;
-          guidelinesDirty = false;
-          guidelinesAllowShrink = false;
-          if (extensionAPI.settings?.canSet === false) continue;
-          try {
-            if (isGuidelinesIndexEnabled(extensionAPI)) {
-              await syncGuidelinesIndex({
-                extensionAPI,
-                getRegistry: defaultRegistryGetter,
-                allowShrink,
-                inboxPageUid: currentInboxPageUid(),
-              });
-            } else {
-              await removeGuidelinesIndex({ extensionAPI });
+    const drainGuidelinesQueue = () => {
+      if (lifecycle.disposed) return Promise.resolve();
+      if (guidelinesPromise) return guidelinesPromise;
+      guidelinesPromise = (async () => {
+        try {
+          while (guidelinesDirty && !lifecycle.disposed) {
+            const allowShrink = guidelinesAllowShrink;
+            guidelinesDirty = false;
+            guidelinesAllowShrink = false;
+            if (extensionAPI.settings?.canSet === false) continue;
+            try {
+              if (isGuidelinesIndexEnabled(extensionAPI)) {
+                await syncGuidelinesIndex({
+                  extensionAPI,
+                  getRegistry: defaultRegistryGetter,
+                  allowShrink,
+                });
+              } else {
+                await removeGuidelinesIndex({ extensionAPI });
+              }
+            } catch (error) {
+              console.warn(`${LOG_PREFIX} Guidelines index reconciliation failed`, error);
             }
-          } catch (error) {
-            console.warn(`${LOG_PREFIX} Guidelines index reconciliation failed`, error);
           }
+        } finally {
+          guidelinesPromise = null;
         }
-      } finally {
-        guidelinesRunning = false;
-      }
+      })();
+      return guidelinesPromise;
     };
 
     const scheduleGuidelinesReconcile = ({ allowShrink = true } = {}) => {
@@ -108,19 +103,6 @@ export async function onload({ extensionAPI, extension } = {}) {
       if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
       await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, checked);
       await scheduleGuidelinesReconcile({ allowShrink: true });
-    };
-
-    const handleToggleCmdJBridge = async (checked) => {
-      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
-      await extensionAPI.settings.set(SETTING_IDS.cmdJBridgeEnabled, checked);
-      if (checked) {
-        await inboxBridge?.start();
-      } else {
-        await inboxBridge?.stop();
-      }
-      if (isGuidelinesIndexEnabled(extensionAPI)) {
-        await scheduleGuidelinesReconcile({ allowShrink: true });
-      }
     };
 
     const handleToggleExtension = async (extKey, field, checked) => {
@@ -156,7 +138,6 @@ export async function onload({ extensionAPI, extension } = {}) {
               onRefresh: () => refreshSettingsPanel({ syncGuidelines: true, allowShrink: true }),
               onToggleExtension: handleToggleExtension,
               onToggleGuidelines: handleToggleGuidelines,
-              onToggleCmdJBridge: handleToggleCmdJBridge,
             }),
           );
         } while (panelDirty && !lifecycle.disposed);
@@ -184,13 +165,6 @@ export async function onload({ extensionAPI, extension } = {}) {
       getRegistry: defaultRegistryGetter,
       onSnapshot,
     });
-
-    inboxBridge = createInboxBridge({ tools });
-    lifecycle.add(() => inboxBridge.dispose());
-    if (isCmdJBridgeEnabled(extensionAPI)) {
-      await inboxBridge.start();
-      if (lifecycle.disposed) return async () => {};
-    }
 
     await refreshSettingsPanel({ syncGuidelines: true, allowShrink: false });
     if (lifecycle.disposed) return async () => {};

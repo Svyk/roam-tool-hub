@@ -27,6 +27,18 @@ function formatError(error) {
   }
 }
 
+function buildTruncatedEnvelope(toolId, serialized, previewLen, maxChars) {
+  const preview = safeSlice(serialized, previewLen);
+  return {
+    tool: toolId,
+    truncated: true,
+    originalChars: serialized.length,
+    maxChars,
+    note: `Result truncated from ${serialized.length} to ${preview.length} characters.`,
+    resultPreview: preview,
+  };
+}
+
 export function finalizeToolResult(toolId, rawResult, maxChars = MAX_RESULT_CHARS) {
   const normalized = rawResult === undefined ? null : rawResult;
   let serialized;
@@ -42,18 +54,32 @@ export function finalizeToolResult(toolId, rawResult, maxChars = MAX_RESULT_CHAR
   if (serialized === undefined) {
     return { tool: toolId, result: null };
   }
-  if (serialized.length <= maxChars) {
-    return { tool: toolId, result: normalized };
+  const fullEnvelope = { tool: toolId, result: normalized };
+  if (JSON.stringify(fullEnvelope).length <= maxChars) {
+    return fullEnvelope;
   }
-  const preview = safeSlice(serialized, maxChars);
-  return {
-    tool: toolId,
-    truncated: true,
-    originalChars: serialized.length,
-    maxChars,
-    note: `Result truncated from ${serialized.length} to ${preview.length} characters.`,
-    resultPreview: preview,
-  };
+
+  // Fit the entire JSON-serialized truncation envelope (including escaped quotes in resultPreview)
+  // within maxChars when maxChars can hold the envelope overhead.
+  const emptyEnvelope = buildTruncatedEnvelope(toolId, serialized, 0, maxChars);
+  if (JSON.stringify(emptyEnvelope).length > maxChars) {
+    return buildTruncatedEnvelope(toolId, serialized, Math.max(0, maxChars), maxChars);
+  }
+
+  let lo = 0;
+  let hi = Math.min(serialized.length, maxChars);
+  let best = emptyEnvelope;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = buildTruncatedEnvelope(toolId, serialized, mid, maxChars);
+    if (JSON.stringify(candidate).length <= maxChars) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
 }
 
 async function invokeWithAttribution(tool, args, context) {
@@ -155,7 +181,16 @@ export function createHubTools({
       };
     }
 
-    const validation = validateAgainstSchema(toolArgs, tool.parameters);
+    let validation;
+    try {
+      validation = validateAgainstSchema(toolArgs, tool.parameters);
+    } catch (error) {
+      return {
+        tool: toolId,
+        code: "schema-error",
+        error: `Parameter schema for "${toolId}" could not be validated: ${formatError(error)}`,
+      };
+    }
     if (!validation.valid) {
       return {
         tool: toolId,

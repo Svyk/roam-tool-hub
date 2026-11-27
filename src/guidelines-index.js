@@ -1,9 +1,6 @@
 import {
   GUIDELINES_PAGE_TITLE,
   GUIDELINES_SUMMARY_THRESHOLD,
-  INBOX_CALL_PREFIX,
-  INBOX_PAGE_TITLE,
-  INBOX_RESULT_PREFIX,
 } from "./constants.js";
 import { defaultRegistryGetter, readRegistrySnapshot } from "./registry.js";
 import {
@@ -15,7 +12,7 @@ import {
 } from "./settings.js";
 
 export const GUIDELINES_HEADING =
-  "**Tool Hub** (generated index — managed by Tool Hub; edit settings instead of this block)";
+  "**Tool Hub** (Local MCP call_extension_tool only — in built-in Cmd-J chat, ignore this section and use normal Roam blocks/tables directly)";
 
 const PAGE_PULL_PATTERN =
   "[:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order]}]}]";
@@ -48,17 +45,21 @@ function generateUid(roamAlphaAPI) {
  * or creates unintended graph references on roam/agent guidelines.
  */
 export function sanitizeRoamMarkup(text) {
-  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
-  if (!clean) return "";
-  return clean
-    .replace(/\{\{/g, "{ {")
-    .replace(/\}\}/g, "} }")
-    .replace(/\[\[/g, "[ [")
-    .replace(/\]\]/g, "] ]")
-    .replace(/\(\(/g, "( (")
-    .replace(/\)\)/g, ") )")
-    .replace(/::/g, ":")
-    .replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
+  let out = String(text ?? "").replace(/\s+/g, " ").replace(/`/g, "'").trim();
+  if (!out) return "";
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = out
+      .replace(/\{\{/g, "{ {")
+      .replace(/\}\}/g, "} }")
+      .replace(/\[\[/g, "[ [")
+      .replace(/\]\]/g, "] ]")
+      .replace(/\(\(/g, "( (")
+      .replace(/\)\)/g, ") )")
+      .replace(/::/g, ":");
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
 }
 
 function pullWithReceiver(roamAlphaAPI, pattern, entity) {
@@ -106,32 +107,14 @@ async function withGuidelinesLock(roamAlphaAPI, fn) {
   return await locks.request(lockName, async () => await fn());
 }
 
-function buildCmdJBridgeInstruction(inboxPageUid) {
-  if (!inboxPageUid) return null;
-  const safeUid = sanitizeRoamMarkup(inboxPageUid);
-  return (
-    `Built-in Cmd-J chat bridge (active): If \`call_extension_tool\` is not in your tool list, `
-    + `call \`create_block\` on page \`${INBOX_PAGE_TITLE}\` (parent uid \`${safeUid}\`) with text `
-    + `\`${INBOX_CALL_PREFIX} {"action":"find_tools","extension":"roam-grid"}\` `
-    + `(actions: \`list_extensions\`, \`find_tools\`, \`describe_tools\`, \`run_read_tool\`, \`run_tool\`), `
-    + `then call \`get_block\` on the created block uid to read the \`${INBOX_RESULT_PREFIX}\` child block.`
-  );
-}
-
 export function buildGuidelinesIndexModel({
   extensions = [],
   isWriteEnabled = () => false,
-  inboxPageUid = null,
 } = {}) {
-  const prefixLines = [];
-  const bridgeLine = buildCmdJBridgeInstruction(inboxPageUid);
-  if (bridgeLine) prefixLines.push(bridgeLine);
-
   if (extensions.length === 0) {
     return {
       heading: GUIDELINES_HEADING,
       children: [
-        ...prefixLines,
         "No extensions currently enabled in Tool Hub. Call list_extensions to check live tools.",
       ],
     };
@@ -146,7 +129,7 @@ export function buildGuidelinesIndexModel({
       const safeSummary = sanitizeRoamMarkup(ext.summary);
       return `**${safeName}** (\`${safeKey}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${safeSummary}`;
     });
-    return { heading: GUIDELINES_HEADING, children: [...prefixLines, ...children] };
+    return { heading: GUIDELINES_HEADING, children };
   }
 
   const groups = new Map();
@@ -174,7 +157,7 @@ export function buildGuidelinesIndexModel({
   children.push(
     `Total: ${extensions.length} enabled extensions (${totalTools} tools). Call list_extensions to browse them.`,
   );
-  return { heading: GUIDELINES_HEADING, children: [...prefixLines, ...children] };
+  return { heading: GUIDELINES_HEADING, children };
 }
 
 export async function syncGuidelinesIndex({
@@ -183,7 +166,6 @@ export async function syncGuidelinesIndex({
   getRegistry = defaultRegistryGetter,
   forceEnabled,
   allowShrink = true,
-  inboxPageUid = null,
 } = {}) {
   const enabled = forceEnabled !== undefined ? Boolean(forceEnabled) : isGuidelinesIndexEnabled(extensionAPI);
   if (!enabled) {
@@ -207,7 +189,6 @@ export async function syncGuidelinesIndex({
     const model = buildGuidelinesIndexModel({
       extensions: enabledExts,
       isWriteEnabled: (key) => isExtensionWriteEnabled(extensionAPI, key),
-      inboxPageUid,
     });
 
     let page = pullGuidelinesPage(roamAlphaAPI);
@@ -225,7 +206,10 @@ export async function syncGuidelinesIndex({
         // Another tab may have created the page concurrently; re-pull below.
       }
       page = pullGuidelinesPage(roamAlphaAPI);
-      pageUid = page?.[":block/uid"] || candidateUid;
+      pageUid = page?.[":block/uid"] || null;
+      if (!pageUid) {
+        return { status: "page-create-failed", writes };
+      }
     }
 
     const storedUid = getGuidelinesBlockUid(extensionAPI);
