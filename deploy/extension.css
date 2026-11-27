@@ -1,9 +1,5 @@
-/* Roam injects this stylesheet on load and removes it on unload. */
-:root {
-  --example-extension-accent: var(--roam-color-primary, #106ba3);
+/* Roam injects this stylesheet on load and removes it on unload.
+ * Tool Hub uses Roam's native settings panel and registers no global overrides. */
+.rth-hidden {
+  display: none;
 }
-
-.example-extension__accent {
-  color: var(--example-extension-accent);
-}
-

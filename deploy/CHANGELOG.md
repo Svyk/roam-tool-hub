@@ -4,16 +4,13 @@ All notable changes to this project follow [Keep a Changelog](https://keepachang
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-08-03
+## [0.1.0] - 2026-11-26
 
 ### Added
 
-- Modular source and deterministic browser-ESM build with exactly pinned esbuild.
-- Root Depot artifacts and matching GitHub Pages output.
-- Idempotent lifecycle helpers for commands, watches, DOM, events, observers, and timers.
-- Verified Roam settings panel example.
-- Node test suite, CI, and GitHub Pages deployment workflow.
-- Node.js 20-compatible build paths and browser-platform dependency enforcement.
-- Build-time rejection of unresolved packages, Node built-ins, and remote imports.
-- Generated-artifact drift enforcement and an automated secret scanner.
-- Immutable GitHub Actions revisions and exact Developer Extension installation guidance.
+- Native Roam AI hub tools via `extensionAPI.ai.addTool`: `list_extensions`, `find_tools`, `describe_tools`, `run_read_tool`, and `run_tool`.
+- Live reader for `window.RoamExtensionTools` with on-demand discovery (no polling, no keydown handlers).
+- Zero-dependency JSON Schema draft-07 subset validator for registry tool arguments.
+- Per-extension settings switches (read tools on by default, writing tools off by default) with Roam-safe key encoding and on-demand refresh.
+- AI write attribution via `context.asTokenUser` plus `context` forwarding, error catching with tool id, and 40,000-character result truncation.
+- Unit tests against a fake registry and deterministic browser-ESM build (`extension.js`, `extension.css`, and matching `deploy/`).
