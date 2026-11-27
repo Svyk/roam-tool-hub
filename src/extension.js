@@ -17,7 +17,6 @@ import {
   isChatBridgeEnabled,
   isGuidelinesIndexEnabled,
   seedExtensionDefaults,
-  setChatAutoApproved,
 } from "./settings.js";
 
 let activeLifecycle = null;
@@ -60,12 +59,8 @@ function roamAi() {
 }
 
 async function getNativeTools() {
-  try {
-    const guidelines = await roamAi()?.getGraphGuidelines?.();
-    return Array.isArray(guidelines?.extensionTools) ? guidelines.extensionTools : [];
-  } catch {
-    return [];
-  }
+  const guidelines = await roamAi()?.getGraphGuidelines?.();
+  return Array.isArray(guidelines?.extensionTools) ? guidelines.extensionTools : [];
 }
 
 function readBlockText(uid) {
@@ -242,7 +237,6 @@ export async function onload({ extensionAPI, extension } = {}) {
       confirmWrite: (request) => confirm.confirm(request),
       isAutoLoadEnabled: () => isChatAutoLoadEnabled(extensionAPI),
       isChatAutoApproved: (extKey) => isChatAutoApproved(extensionAPI, extKey),
-      setChatAutoApproved: (extKey, value) => setChatAutoApproved(extensionAPI, extKey, value),
       readBlockText,
       onStatus: (status) => {
         const text = describeChatBridgeStatus(status);

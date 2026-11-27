@@ -38,7 +38,7 @@ To turn it on, open Settings, then the Tool Hub tab, and switch on **Built-in ch
 
 **Chat: load matching tools automatically** puts the tools that match your message in front of the model before it asks. It is on by default.
 
-Reading tools run when the chat calls them. A tool that changes the graph first opens a dialog with its name and arguments. Choose **Deny**, **Allow once**, or **Always allow** for that extension. The dialog has no default button, so a stray Enter does not approve anything. A chat that cannot edit the graph never gets writing tools. Each extension also has a **chat may change the graph without asking** switch. It is off by default. Turn it on only for extensions you trust.
+Reading tools run when the chat calls them. A tool that changes the graph first opens a dialog with its name and arguments. Choose **Deny**, **Allow `<Extension>` in this chat**, or **Allow once**. Allowing an extension in a chat lasts only for that conversation and is not saved across reloads. Tools that delete, clear, restore, archive, or change things in bulk always ask with only **Deny** and **Allow once**, even after in-chat approval or with the Settings switch on. The dialog has no default button, so a stray Enter does not approve anything. A chat that cannot edit the graph never gets writing tools. Each extension also has a **chat may change the graph without asking** switch in Settings. It is off by default. Turn it on only for extensions you trust.
 
 The bridge uses a part of Roam that is not documented. It checks the runtime before it changes anything. If Roam changes that runtime, the bridge turns itself off, the setting line says why, and the chat works as before. Remove the bridge once Roam lets extension tools into the built-in chat.
 

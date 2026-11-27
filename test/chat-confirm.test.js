@@ -91,7 +91,7 @@ test("the dialog has the Blueprint structure and three buttons", async () => {
   assert.equal(find(dialog, (node) => node.tag === "pre")[0].textContent, JSON.stringify({ uid: "u1" }, null, 2));
   assert.equal(find(dialog, (node) => node.className === "bp3-dialog-footer-actions").length, 1);
 
-  assert.deepEqual(buttons(doc).map((node) => node.textContent), ["Deny", "Always allow Roam Grid", "Allow once"]);
+  assert.deepEqual(buttons(doc).map((node) => node.textContent), ["Deny", "Allow Roam Grid in this chat", "Allow once"]);
   assert.match(buttons(doc)[2].className, /bp3-intent-primary/);
   assert.equal(Object.keys(dialog.listeners).length, 0);
   assert.equal(Object.keys(doc.body.listeners).length, 0);
@@ -100,11 +100,25 @@ test("the dialog has the Blueprint structure and three buttons", async () => {
 });
 
 test("each button resolves its own decision and removes the dialog", async () => {
-  for (const [index, expected] of [[0, "deny"], [1, "always"], [2, "once"]]) {
+  for (const [index, expected] of [[0, "deny"], [1, "chat"], [2, "once"]]) {
     const doc = fakeDocument();
     const confirm = createChatConfirm({ documentRef: doc });
     const pending = confirm.confirm(request());
     buttons(doc)[index].click();
+    assert.equal(await pending, expected);
+    assert.equal(doc.body.children.length, 0);
+  }
+});
+
+test("allowChat false shows only Deny and Allow once", async () => {
+  for (const [index, expected] of [[0, "deny"], [1, "once"]]) {
+    const doc = fakeDocument();
+    const confirm = createChatConfirm({ documentRef: doc });
+    const pending = confirm.confirm(request({ allowChat: false }));
+    const btns = buttons(doc);
+    assert.deepEqual(btns.map((node) => node.textContent), ["Deny", "Allow once"]);
+    assert.match(btns[1].className, /bp3-intent-primary/);
+    btns[index].click();
     assert.equal(await pending, expected);
     assert.equal(doc.body.children.length, 0);
   }

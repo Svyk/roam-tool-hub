@@ -60,7 +60,6 @@ function setup({ pi: piOverride, withPi = true, registry = buildRegistryFromFixt
   const runTool = hubTools.find((tool) => tool.name === "run_tool");
   const toolRuns = [];
   const confirmations = [];
-  const approvals = [];
   const options = {
     windowRef: win,
     extensionAPI,
@@ -74,14 +73,11 @@ function setup({ pi: piOverride, withPi = true, registry = buildRegistryFromFixt
       return "once";
     },
     isChatAutoApproved: () => false,
-    setChatAutoApproved: async (key, value) => {
-      approvals.push([key, value]);
-    },
     logger,
     ...bridgeOptions,
   };
   const bridge = createChatBridge(options);
-  return { fake, pi: fake.pi, win, registry, settingValues, bridge, options, logger, toolRuns, confirmations, approvals };
+  return { fake, pi: fake.pi, win, registry, settingValues, bridge, options, logger, toolRuns, confirmations };
 }
 
 async function attachAndBoot(ctx, { mode = "edit", content } = {}) {
@@ -217,8 +213,8 @@ test("a read-only chat never gets a writing tool", async () => {
   assert.deepEqual(result.control.addTools, ["rg_get_grid"]);
 });
 
-test("a writing tool in an edit chat asks first; deny, once and always behave", async () => {
-  const decisions = ["deny", "once", "always"];
+test("a writing tool in an edit chat asks first; deny, once and chat approval scope properly", async () => {
+  const decisions = ["deny", "once", "chat", "once", "once"];
   const ctx = setup({
     bridgeOptions: {
       confirmWrite: async (request) => {
@@ -227,7 +223,7 @@ test("a writing tool in an edit chat asks first; deny, once and always behave", 
       },
     },
   });
-  const { conversation } = await attachAndBoot(ctx);
+  const { harness, roamTools, conversation } = await attachAndBoot(ctx);
 
   const denied = await runToolCall(conversation, "rg_sort", { uid: "u1" });
   assert.deepEqual(denied, { blocked: "The user rejected this change." });
@@ -235,24 +231,112 @@ test("a writing tool in an edit chat asks first; deny, once and always behave", 
   const [request] = ctx.confirmations;
   assert.equal(request.toolName, "rg_sort");
   assert.equal(request.extensionName, "Roam Grid");
+  assert.equal(request.allowChat, true);
   assert.deepEqual(request.args, { uid: "u1" });
 
   const once = await runToolCall(conversation, "rg_sort", { uid: "u2" });
   assert.equal(JSON.parse(once.result.output[0].text).name, "rg_sort");
   assert.deepEqual(ctx.toolRuns, ["roam-grid/rg_sort"]);
-  assert.deepEqual(ctx.approvals, []);
 
-  const always = await runToolCall(conversation, "rg_sort", { uid: "u3" });
-  assert.equal(always.result.isError, false);
-  assert.deepEqual(ctx.approvals, [["roam-grid", true]]);
+  const inChat = await runToolCall(conversation, "rg_sort", { uid: "u3" });
+  assert.equal(inChat.result.isError, false);
   assert.equal(ctx.confirmations.length, 3);
 
+  // Second writing tool from the same extension in the same conversation: no dialog.
+  const secondSameExt = await runToolCall(conversation, "rg_set_cell", { uid: "u3", row: "0", col: "0", value: "x" });
+  assert.equal(secondSameExt.result.isError, false);
+  assert.equal(ctx.confirmations.length, 3);
+
+  // Another extension in the same conversation still asks.
+  const otherExt = await runToolCall(conversation, "bt_create", { text: "x" });
+  assert.equal(otherExt.result.isError, false);
+  assert.equal(ctx.confirmations.length, 4);
+  assert.equal(ctx.confirmations[3].extensionKey, "better-tasks");
+  assert.equal(ctx.confirmations[3].allowChat, true);
+
+  // Another conversation still asks for Roam Grid.
+  const secondConv = await harness.createConversation({}, {});
+  await roamTurn(secondConv, roamTools, { mode: "edit" });
+  const otherConv = await runToolCall(secondConv, "rg_sort", { uid: "u4" });
+  assert.equal(otherConv.result.isError, false);
+  assert.equal(ctx.confirmations.length, 5);
+  assert.equal(ctx.confirmations[4].allowChat, true);
+
+  // Read tools never ask.
   const read = await runToolCall(conversation, "rg_get_grid", { uid: "u4" });
   assert.equal(read.result.isError, false);
-  assert.equal(ctx.confirmations.length, 3);
+  assert.equal(ctx.confirmations.length, 5);
 });
 
-test("an extension approved for chat writes runs without a dialog", async () => {
+test("destructive tools always ask with allowChat false, even after chat approval or Settings switch", async () => {
+  // 1. After in-chat approval on roam-grid.
+  const chatDecisions = ["chat", "once"];
+  const ctx = setup({
+    bridgeOptions: {
+      confirmWrite: async (request) => {
+        ctx.confirmations.push(request);
+        return chatDecisions.shift();
+      },
+    },
+  });
+  const { conversation } = await attachAndBoot(ctx);
+  await runToolCall(conversation, "rg_sort", { uid: "u1" });
+  assert.equal(ctx.confirmations.length, 1);
+  assert.equal(ctx.confirmations[0].allowChat, true);
+
+  const del = await runToolCall(conversation, "rg_delete_rows", { uid: "u1", index: "0" });
+  assert.equal(del.result.isError, false);
+  assert.equal(ctx.confirmations.length, 2);
+  assert.equal(ctx.confirmations[1].toolName, "rg_delete_rows");
+  assert.equal(ctx.confirmations[1].allowChat, false);
+
+  // 2. Even with the Settings "without asking" switch on.
+  const autoCtx = setup({
+    bridgeOptions: {
+      isChatAutoApproved: () => true,
+    },
+  });
+  const autoChat = await attachAndBoot(autoCtx);
+  const nonDestructive = await runToolCall(autoChat.conversation, "rg_sort", { uid: "u1" });
+  assert.equal(nonDestructive.result.isError, false);
+  assert.equal(autoCtx.confirmations.length, 0);
+
+  for (const [toolName, args] of [
+    ["rg_delete_rows", { uid: "u1" }],
+    ["rg_restore_native", { uid: "u1" }],
+    ["bt_delete", { uid: "u1" }],
+    ["bt_bulk_snooze", { uids: "u1", days: "1" }],
+  ]) {
+    const before = autoCtx.confirmations.length;
+    const res = await runToolCall(autoChat.conversation, toolName, args);
+    assert.equal(res.result.isError, false, toolName);
+    assert.equal(autoCtx.confirmations.length, before + 1, toolName);
+    assert.equal(autoCtx.confirmations[before].allowChat, false, toolName);
+  }
+});
+
+test("a conversation with no recorded access always asks with allowChat false", async () => {
+  const ctx = setup({
+    bridgeOptions: {
+      isChatAutoApproved: () => true,
+    },
+  });
+  const { conversation } = await attachAndBoot(ctx);
+  const agent = await conversation.agent({});
+  const hub = agent.extensions.find((ext) => ext.name === CHAT_EXTENSION_NAME);
+  const hook = hub.hooks[0];
+
+  const verdict = await hook.handlers.beforeTool(
+    { name: "rg_sort", arguments: { uid: "u1" } },
+    { conversationId: "unseen-conversation-after-reload" },
+    {},
+  );
+  assert.equal(verdict, undefined);
+  assert.equal(ctx.confirmations.length, 1);
+  assert.equal(ctx.confirmations[0].allowChat, false);
+});
+
+test("an extension approved for chat writes runs non-destructive writes without a dialog", async () => {
   const ctx = setup({ bridgeOptions: { isChatAutoApproved: (key) => key === "roam-grid" } });
   const { conversation } = await attachAndBoot(ctx);
   const ran = await runToolCall(conversation, "rg_sort", { uid: "u1" });
@@ -502,7 +586,88 @@ test("without a window the bridge builds, refuses to attach and detaches cleanly
   return bridge.refresh();
 });
 
-test("native tools use stale-while-revalidate: first read waits, later stale reads return cached at once and reinstall in background", async () => {
+test("failed first native read leaves ready false; next turn waits (bounded) and gets tools once read succeeds", async () => {
+  const boardListTool = {
+    tool: "https://x.github.io/plexus-diagram//list_boards",
+    extension: "https://x.github.io/plexus-diagram/",
+    description: "List boards.",
+    scope: "read",
+  };
+  let calls = 0;
+  let resolveSecond;
+  const ctx = setup({
+    bridgeOptions: {
+      nativeToolsTimeoutMs: 500,
+      nativeToolsTtlMs: 0,
+      nativeToolsTurnWaitMs: 300,
+      getNativeTools: () => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error("boot not ready"));
+        return new Promise((resolve) => { resolveSecond = resolve; });
+      },
+    },
+  });
+
+  ctx.bridge.attach();
+  await waitFor(() => ctx.bridge.status().phase === "ready", "ready after failed first read");
+  assert.equal(calls, 1);
+
+  const chat = await bootRoamChat(ctx.pi);
+  const conversation = await chat.harness.createConversation({}, {});
+  const turnPromise = roamTurn(conversation, chat.roamTools, { mode: "edit" });
+  await waitFor(() => typeof resolveSecond === "function", "second native read started on turn");
+  setTimeout(() => resolveSecond([boardListTool]), 20);
+  await turnPromise;
+
+  const callable = toolNames(await conversation.agent({}), "callable");
+  assert.ok(callable.includes("list_boards"), callable.join());
+});
+
+test("a hanging native read never holds a turn longer than nativeToolsTurnWaitMs", async () => {
+  const boardListTool = {
+    tool: "https://x.github.io/plexus-diagram//list_boards",
+    extension: "https://x.github.io/plexus-diagram/",
+    description: "List boards.",
+    scope: "read",
+  };
+  let calls = 0;
+  let resolveSecond;
+  const ctx = setup({
+    bridgeOptions: {
+      nativeToolsTimeoutMs: 5_000,
+      nativeToolsTtlMs: 0,
+      nativeToolsTurnWaitMs: 40,
+      getNativeTools: () => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error("initial failure"));
+        if (calls === 2) return new Promise((resolve) => { resolveSecond = resolve; });
+        return Promise.resolve([boardListTool]);
+      },
+    },
+  });
+
+  ctx.bridge.attach();
+  await waitFor(() => ctx.bridge.status().phase === "ready", "ready after initial failure");
+  const chat = await bootRoamChat(ctx.pi);
+  const conversation = await chat.harness.createConversation({}, {});
+
+  const startedAt = Date.now();
+  await roamTurn(conversation, chat.roamTools, { mode: "edit" });
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 500, `turn was held for ${elapsed} ms`);
+  assert.equal(toolNames(await conversation.agent({}), "callable").includes("list_boards"), false);
+
+  // Resolving the hanging read updates only the cache; the next turn picks it up.
+  resolveSecond([boardListTool]);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(toolNames(await conversation.agent({}), "callable").includes("list_boards"), false);
+
+  await roamTurn(conversation, chat.roamTools, { mode: "edit" });
+  assert.ok(toolNames(await conversation.agent({}), "callable").includes("list_boards"));
+});
+
+test("a background fetch finishing mid-turn does not change registry or agent().callable until the next turn", async () => {
   const boardListTool = {
     tool: "https://x.github.io/plexus-diagram//list_boards",
     extension: "https://x.github.io/plexus-diagram/",
@@ -526,7 +691,8 @@ test("native tools use stale-while-revalidate: first read waits, later stale rea
       getNativeTools: () => {
         calls += 1;
         if (calls === 1) return new Promise((resolve) => { resolveFirst = resolve; });
-        return new Promise((resolve) => { resolveSecond = resolve; });
+        if (calls === 2) return new Promise((resolve) => { resolveSecond = resolve; });
+        return Promise.resolve([boardListTool, boardReadTool]);
       },
     },
   });
@@ -539,8 +705,7 @@ test("native tools use stale-while-revalidate: first read waits, later stale rea
 
   const chat = await bootRoamChat(ctx.pi);
   const conversation = await chat.harness.createConversation({}, {});
-  // Second turn triggers a stale read: must complete immediately using the cached list
-  // while the second getNativeTools() promise is still unresolved.
+  // Turn 1 returns cached list_boards immediately and starts a background refresh.
   await roamTurn(conversation, chat.roamTools, { mode: "edit" });
   assert.equal(calls, 2);
   assert.equal(typeof resolveSecond, "function");
@@ -548,47 +713,148 @@ test("native tools use stale-while-revalidate: first read waits, later stale rea
   assert.ok(callable.includes("list_boards"));
   assert.equal(callable.includes("read_board"), false);
 
-  // Another stale turn while the background read is still in flight deduplicates the fetch.
+  // Another stale turn while background fetch is in flight deduplicates it.
   await roamTurn(conversation, chat.roamTools, { mode: "edit" });
   assert.equal(calls, 2);
 
-  // When the background fetch resolves with an updated list, the registry is reinstalled.
+  // Background fetch finishes mid-turn: registry and callable MUST NOT change yet.
   resolveSecond([boardListTool, boardReadTool]);
-  await waitFor(
-    () => chat.registry.snapshot().extension(CHAT_EXTENSION_NAME)?.tools?.some((t) => t.name === "read_board"),
-    "background native refresh reinstalled",
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    chat.registry.snapshot().extension(CHAT_EXTENSION_NAME)?.tools?.some((t) => t.name === "read_board"),
+    false,
   );
+  callable = toolNames(await conversation.agent({}), "callable");
+  assert.equal(callable.includes("read_board"), false);
+
+  // The next turn applies the updated cache cleanly.
   await roamTurn(conversation, chat.roamTools, { mode: "edit" });
+  assert.equal(
+    chat.registry.snapshot().extension(CHAT_EXTENSION_NAME)?.tools?.some((t) => t.name === "read_board"),
+    true,
+  );
   callable = toolNames(await conversation.agent({}), "callable");
   assert.ok(callable.includes("read_board"));
 });
 
-test("background native refresh after detach does not reinstall the extension", async () => {
+test("bridge.refresh() awaits a fresh native read before resolving", async () => {
   const boardListTool = {
     tool: "https://x.github.io/plexus-diagram//list_boards",
     extension: "https://x.github.io/plexus-diagram/",
     description: "List boards.",
     scope: "read",
   };
+  const boardReadTool = {
+    tool: "https://x.github.io/plexus-diagram//read_board",
+    extension: "https://x.github.io/plexus-diagram/",
+    description: "Read a board.",
+    scope: "read",
+  };
   let calls = 0;
-  let resolveSecond;
+  let resolveRefresh;
   const ctx = setup({
     bridgeOptions: {
-      nativeToolsTtlMs: 0,
+      nativeToolsTtlMs: 60_000,
       getNativeTools: () => {
         calls += 1;
-        if (calls === 1) return Promise.resolve([]);
-        return new Promise((resolve) => { resolveSecond = resolve; });
+        if (calls === 1) return Promise.resolve([boardListTool]);
+        return new Promise((resolve) => { resolveRefresh = resolve; });
       },
     },
   });
   const { registry } = await attachAndBoot(ctx);
-  await waitFor(() => typeof resolveSecond === "function", "background refresh started");
+  assert.equal(calls, 1);
+
+  let settled = false;
+  const pending = ctx.bridge.refresh().then(() => { settled = true; });
+  await waitFor(() => typeof resolveRefresh === "function", "forced refresh read started");
+  assert.equal(settled, false);
+  resolveRefresh([boardListTool, boardReadTool]);
+  await pending;
+  assert.equal(settled, true);
+  assert.equal(
+    registry.snapshot().extension(CHAT_EXTENSION_NAME)?.tools?.some((t) => t.name === "read_board"),
+    true,
+  );
+});
+
+test("a bridge detached while its read is in flight does not touch the status a newer bridge wrote", async () => {
+  const boardListTool = {
+    tool: "https://x.github.io/plexus-diagram//list_boards",
+    extension: "https://x.github.io/plexus-diagram/",
+    description: "List boards.",
+    scope: "read",
+  };
+  let resolveSlow;
+  const ctx = setup({
+    bridgeOptions: {
+      getNativeTools: () => new Promise((resolve) => { resolveSlow = resolve; }),
+    },
+  });
+  ctx.bridge.attach();
+  await waitFor(() => typeof resolveSlow === "function", "first bridge read started");
   ctx.bridge.detach();
-  resolveSecond([boardListTool]);
+
+  const second = createChatBridge({
+    ...ctx.options,
+    extensionAPI: makeSettings(
+      Object.fromEntries(Object.keys(ctx.registry).map((key) => [extensionEnabledSettingId(key), false])),
+    ),
+    getNativeTools: async () => [],
+  });
+  second.attach();
+  await waitFor(() => second.status().phase === "ready", "second bridge ready");
+  const beforeStatus = { phase: second.status().phase, tools: second.status().tools };
+  assert.equal(beforeStatus.tools, 0);
+
+  resolveSlow([boardListTool]);
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(registry.snapshot().extension(CHAT_EXTENSION_NAME), undefined);
+  assert.equal(second.status().phase, beforeStatus.phase);
+  assert.equal(second.status().tools, beforeStatus.tools);
+  second.detach();
+});
+
+test("a tool entering the catalog after this turn's configure is reported under not_loaded, not loaded", async () => {
+  const ctx = setup();
+  // Start with roam-grid disabled so Turn 1's offered set excludes rg_* tools.
+  ctx.settingValues[extensionEnabledSettingId("roam-grid")] = false;
+  const { conversation } = await attachAndBoot(ctx, { mode: "edit" });
+
+  // Enable roam-grid and refresh mid-turn (without a new configure on this conversation).
+  ctx.settingValues[extensionEnabledSettingId("roam-grid")] = true;
+  await ctx.bridge.refresh();
+
+  // Asking by exact name reports rg_get_grid in not_loaded, not loaded/tools.
+  const byName = await runToolCall(conversation, "find_extension_tools", { names: ["rg_get_grid", "bt_search"] });
+  const namePayload = JSON.parse(byName.result.output[0].text);
+  assert.deepEqual(namePayload.loaded, ["bt_search"]);
+  assert.deepEqual(namePayload.tools.map((t) => t.name), ["bt_search"]);
+  assert.deepEqual(namePayload.not_loaded, [
+    { name: "rg_get_grid", reason: "Not available in this turn. Ask again in your next message." },
+  ]);
+  assert.deepEqual(byName.result.control, { addTools: ["bt_search"] });
+
+  // Asking by query for a newly added tool also reports it under not_loaded and sets no control.addTools.
+  const byQuery = await runToolCall(conversation, "find_extension_tools", { query: "rg_get_grid", extension: "Roam Grid", limit: 2 });
+  const queryPayload = JSON.parse(byQuery.result.output[0].text);
+  assert.deepEqual(queryPayload.loaded, []);
+  assert.deepEqual(queryPayload.tools, []);
+  assert.ok(queryPayload.not_loaded.some((row) => (
+    row.name === "rg_get_grid" && row.reason === "Not available in this turn. Ask again in your next message."
+  )));
+  assert.equal(byQuery.result.control, undefined);
+
+  // rememberLoaded did not record rg_get_grid.
+  const savedConv = ctx.win[CHAT_BRIDGE_STATE_KEY].conversations.get(conversation.id);
+  assert.equal(savedConv.loaded.has("rg_get_grid"), false);
+  assert.equal(savedConv.loaded.has("bt_search"), true);
+
+  // preload also refuses to load a tool that was not offered in this turn's configure.
+  await conversation.submit({ type: "input", content: SORT_REQUEST }, {});
+  assert.equal(savedConv.loaded.has("rg_sort"), false);
+  assert.equal(conversation.config.modelTools?.add?.includes("rg_sort") ?? false, false);
 });
 
 test("preload filters carried-over loaded tools when access changes to read-only or an extension is disabled", async () => {

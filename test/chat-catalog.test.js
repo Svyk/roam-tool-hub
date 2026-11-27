@@ -8,9 +8,11 @@ import {
   buildChatCatalog,
   deriveChatAccess,
   findExtensionTools,
+  isDestructiveToolName,
   readNativeExtensions,
   renderIndexSection,
   suggestTools,
+  tokenize,
 } from "../src/chat-catalog.js";
 import { MAX_GUIDE_CHARS as CONSTANT_MAX_GUIDE_CHARS } from "../src/constants.js";
 import { readRegistrySnapshot } from "../src/registry.js";
@@ -170,72 +172,190 @@ test("suggestTools picks the right tools for clear requests", () => {
   assert.ok(names("Export every task in my graph as CSV.").includes("bt_export"));
 });
 
-test("suggestTools matches compound query words against native tools without matching generic suffixes", () => {
-  const native = readNativeExtensions([
+function fullNativeRaw() {
+  return [
     {
-      tool: "https://x.github.io/plexus-diagram//list_boards",
-      extension: "https://x.github.io/plexus-diagram/",
-      description: "Lists the Plexus whiteboards in this graph with their uid, title, page and card count.",
+      tool: "https://svyk.github.io/plexus-diagram//list_boards",
+      extension: "https://svyk.github.io/plexus-diagram/",
+      description: "Lists the Plexus whiteboards in this graph with their uid, title, page and card count. Use it first to find a board uid. Up to 200 boards.",
       scope: "read",
+      inputSchema: { type: "object", properties: { page: { type: "string" } } },
     },
     {
-      tool: "https://x.github.io/plexus-diagram//read_board",
-      extension: "https://x.github.io/plexus-diagram/",
-      description: "Reads cards, sections and arrows from one board.",
+      tool: "https://svyk.github.io/plexus-diagram//read_board",
+      extension: "https://svyk.github.io/plexus-diagram/",
+      description: "Reads one Plexus board: its outline as text, plus every section, card and arrow with world rectangles. Use it before changing a board. Returns at most 500 cards and 40000 characters of text.",
       scope: "read",
+      inputSchema: { type: "object", properties: { board: { type: "string" } }, required: ["board"] },
     },
     {
-      tool: "https://x.github.io/plexus-diagram//add_cards",
-      extension: "https://x.github.io/plexus-diagram/",
-      description: "Adds cards to a board.",
+      tool: "https://svyk.github.io/plexus-diagram//add_cards",
+      extension: "https://svyk.github.io/plexus-diagram/",
+      description: "Adds cards to a board. Each card is plain text, one [[Page]] link or one ((block uid)).",
       scope: "edit",
+      inputSchema: { type: "object", properties: { board: { type: "string" }, cards: { type: "array" }, section: { type: "string" } } },
     },
-  ]);
+    {
+      tool: "https://svyk.github.io/plexus-diagram//add_section",
+      extension: "https://svyk.github.io/plexus-diagram/",
+      description: "Adds an empty titled section (a frame that groups cards) to a board.",
+      scope: "append",
+      inputSchema: { type: "object", properties: { board: { type: "string" }, title: { type: "string" } } },
+    },
+    {
+      tool: "https://svyk.github.io/plexus-diagram//connect_cards",
+      extension: "https://svyk.github.io/plexus-diagram/",
+      description: "Draws an arrow between two items on a board, with an optional label.",
+      scope: "append",
+      inputSchema: { type: "object", properties: { board: { type: "string" }, from: { type: "string" }, to: { type: "string" } } },
+    },
+    {
+      tool: "https://svyk.github.io/plexus-diagram//arrange_board",
+      extension: "https://svyk.github.io/plexus-diagram/",
+      description: "Re-lays out cards in a grid, a row, a column or an outline.",
+      scope: "edit",
+      inputSchema: { type: "object", properties: { board: { type: "string" }, mode: { type: "string" } } },
+    },
+    {
+      tool: "https://svyk.github.io/Roam-Task-Status-Tags//list_statuses",
+      extension: "https://svyk.github.io/Roam-Task-Status-Tags/",
+      description: "Lists every task status configured in this graph with its tag, group (task, media, or extra), whether click-to-cycle visits it, and the tag format used on task blocks.",
+      scope: "read",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      tool: "https://svyk.github.io/Roam-Task-Status-Tags//get_task_status",
+      extension: "https://svyk.github.io/Roam-Task-Status-Tags/",
+      description: "Reads the current workflow status and TODO/DONE state for 1 to 50 blocks by uid.",
+      scope: "read",
+      inputSchema: { type: "object", properties: { uids: { type: "array" } } },
+    },
+    {
+      tool: "https://svyk.github.io/Roam-Task-Status-Tags//list_tasks",
+      extension: "https://svyk.github.io/Roam-Task-Status-Tags/",
+      description: "Lists tasks that carry a configured task status tag, optionally filtered to one status.",
+      scope: "read",
+      inputSchema: { type: "object", properties: { status: { type: "string" }, include_done: { type: "boolean" }, limit: { type: "integer" } } },
+    },
+    {
+      tool: "https://svyk.github.io/Roam-Task-Status-Tags//status_counts",
+      extension: "https://svyk.github.io/Roam-Task-Status-Tags/",
+      description: "Counts tasks per configured status across the graph, including statuses with zero tasks.",
+      scope: "read",
+      inputSchema: { type: "object", properties: { include_done: { type: "boolean" } } },
+    },
+    {
+      tool: "https://svyk.github.io/Roam-Task-Status-Tags//set_task_status",
+      extension: "https://svyk.github.io/Roam-Task-Status-Tags/",
+      description: "Sets or clears the workflow status on 1 to 10 existing TODO or DONE tasks.",
+      scope: "edit",
+      inputSchema: { type: "object", properties: { changes: { type: "array" } } },
+    },
+  ];
+}
+
+function fullCatalog() {
   const registry = buildRegistryFromFixture();
   const snapshot = readRegistrySnapshot(() => registry);
-  // Default native write switch off, registry switches on.
+  const native = readNativeExtensions(fullNativeRaw());
   const values = allOn(snapshot.extensions.map((ext) => ext.key));
-  const catalog = fixtureCatalog({ registry, native, values });
+  for (const ext of native) {
+    values[extensionEnabledSettingId(ext.key)] = true;
+    values[extensionWriteSettingId(ext.key)] = false;
+  }
+  return fixtureCatalog({ registry, native, values });
+}
+
+test("suggestTools stays quiet on everyday notes and false-compound traps with full fixture and native tools", () => {
+  const catalog = fullCatalog();
+  const quietPrompts = [
+    "Rewrite this note so the tone is more comfortable and natural.",
+    "Make a roast vegetables shopping list on today's daily note.",
+    "What are two alternative phrasings for this opening paragraph?",
+    "What keyboard shortcuts move a block up and down in Roam?",
+    "Clean up the formatting of this text I pasted from my clipboard.",
+    "Draft a morning dispatch note for the sanitation shift lead.",
+    "Check if there are any vendor discounts mentioned in Lab Supplies.",
+    "Sketch a text flowchart of the pasteurization decision tree.",
+    "Write a detailed summary of Out of the Silent Planet.",
+    "Suggest a crisper title for today's meeting notes.",
+    "Exporting my notes to PDF after proofreading.",
+    "Please proofread this paragraph and make a checklist",
+    "Export my graph to an Anki flashcard deck (.apkg) and email it to me.",
+  ];
+  for (const text of quietPrompts) {
+    assert.deepEqual(
+      suggestTools(catalog, text, { access: "edit" }).map((tool) => tool.chatName),
+      [],
+      text,
+    );
+  }
+});
+
+test("suggestTools uses query aliases to match whiteboards, spreadsheets, datagrids, subtasks and todos", () => {
+  const catalog = fullCatalog();
   const names = (text) => suggestTools(catalog, text, { access: "edit" }).map((tool) => tool.chatName);
 
-  const boards = names("What whiteboards do I have, and what's on one of the smaller ones?");
+  const boards = names("What whiteboards do I have, and what's on the smallest one?");
   assert.ok(boards.includes("list_boards"), boards.join());
   assert.ok(boards.includes("read_board"), boards.join());
 
-  assert.deepEqual(names("Please proofread this paragraph and make a checklist"), []);
-  assert.deepEqual(names("Export my graph to an Anki flashcard deck (.apkg) and email it to me."), []);
+  const spreadsheets = names("Do I have any spreadsheets tracking weekly expenses?");
+  assert.ok(spreadsheets.includes("rg_list_grids"), spreadsheets.join());
+
+  const datagrids = names("List all datagrids on this page.");
+  assert.ok(datagrids.includes("rg_list_grids"), datagrids.join());
+
+  const subtasks = suggestTools(catalog, "Show me all open subtasks due this week.", { access: "edit" });
+  assert.ok(
+    subtasks.some((tool) => tool.extensionKey === "better-tasks" && tool.readOnly),
+    subtasks.map((t) => t.chatName).join(),
+  );
+
+  const todos = suggestTools(catalog, "Show my overdue todos", { access: "edit" });
+  assert.ok(
+    todos.some((tool) => tool.extensionKey === "better-tasks" && tool.readOnly),
+    todos.map((t) => t.chatName).join(),
+  );
+
+  assert.ok(names("Export every task in my graph as CSV.").includes("bt_export"));
 });
 
-test("suggestTools keeps head and tail tokens on very long prompts", () => {
-  const native = readNativeExtensions([
-    {
-      tool: "https://x.github.io/Roam-Task-Status-Tags//list_statuses",
-      extension: "https://x.github.io/Roam-Task-Status-Tags/",
-      description: "Lists every task status configured in this graph.",
-      scope: "read",
-    },
-  ]);
-  const catalog = fixtureCatalog({ native });
-  const background = [
-    "I have been reorganizing study notes covering microbiology food safety regulations statistical",
-    "process control charts thermal inactivation curves sampling plans laboratory validation protocols",
-    "equipment cleaning schedules allergen cross contact audits moisture activity thresholds shelf",
-    "modeling packaging integrity inspections supplier qualification binders deviation investigation",
-    "templates corrective action timelines preventive maintenance calendars calibration certificates",
-    "environmental swabbing zones biofilm resistance literature conference presentation drafts October November.",
+test("suggestTools finds a request in the middle of an 87-token prompt and keeps head and tail past 120 tokens", () => {
+  const catalog = fullCatalog();
+  const fillerA = [
+    "During Monday morning lab review we discussed pasteurization temperatures microbial lethality",
+    "decimal reduction times spore germination kinetics stainless steel surface roughness hygienic",
+    "welding standards cleanroom pressure differentials air filtration efficiency gowning compliance",
+    "operator handwashing logs shift handover checklists reagent expiration dates incubator",
   ].join(" ");
-  const tailAsk = `${background} After all that background, please check what task statuses are configured and give me an oblique strategy.`;
+  const fillerB = [
+    "Furthermore Tuesday afternoon notes covered supplier certificates mycotoxin screening heavy",
+    "metal limits infant fortification premix homogeneity dry blending validation",
+    "environmental monitoring zones Listeria monocytogenes Cronobacter sakazakii swabbing locations",
+    "corrective action root cause investigations regulatory inspection readiness audit trails",
+  ].join(" ");
+  const middlePrompt = `${fillerA} Please sort the swabbing table by zone using the context below: ${fillerB} thermal profiling verification`;
+  const middleTokens = tokenize(middlePrompt);
+  assert.equal(middleTokens.length, 87, `expected 87 tokens, got ${middleTokens.length}`);
+  const middleNames = suggestTools(catalog, middlePrompt, { access: "edit" }).map((tool) => tool.chatName);
+  assert.ok(middleNames.includes("rg_sort"), middleNames.join());
+
+  const extraFiller = Array.from({ length: 50 }, (_, i) => `appendixtoken${i}`).join(" ");
+  const longText = `${fillerA} ${extraFiller} ${fillerB}`;
+  assert.ok(tokenize(longText).length > 120);
+  const tailAsk = `${longText} After all that background, please check what task statuses are configured and give me an oblique strategy.`;
   const tailNames = suggestTools(catalog, tailAsk, { access: "edit" }).map((tool) => tool.chatName);
   assert.ok(tailNames.includes("os_random_strategy"), tailNames.join());
   assert.ok(tailNames.includes("list_statuses"), tailNames.join());
 
-  const headAsk = `Give me an oblique strategy for these notes: ${background}`;
+  const headAsk = `Give me an oblique strategy for these notes: ${longText}`;
   const headNames = suggestTools(catalog, headAsk, { access: "edit" }).map((tool) => tool.chatName);
   assert.ok(headNames.includes("os_random_strategy"), headNames.join());
 });
 
-test("suggestTools does not pull in extra template list companions when a locator is already present or loaded", () => {
-  const catalog = fixtureCatalog();
+test("suggestTools ignores template tools as companions and picks locators by score first", () => {
+  const catalog = fullCatalog();
   const createTask = suggestTools(
     catalog,
     "Create a task '[stress] Review lab checklist' due December 2, 2026 in the project Stress Test",
@@ -245,6 +365,14 @@ test("suggestTools does not pull in extra template list companions when a locato
   assert.ok(createTask.includes("bt_search"), createTask.join());
   assert.equal(createTask.includes("bt_list_templates"), false, createTask.join());
 
+  const withTemplateExcluded = suggestTools(
+    catalog,
+    "Modify the calibration task uid k9Lm2pQr8 so its priority is high.",
+    { access: "edit", exclude: ["bt_list_templates"] },
+  ).map((tool) => tool.chatName);
+  assert.ok(withTemplateExcluded.includes("bt_modify"), withTemplateExcluded.join());
+  assert.ok(withTemplateExcluded.includes("bt_search"), withTemplateExcluded.join());
+
   const formulaFollowUp = suggestTools(
     catalog,
     "Add a bottom row named Total with formulas summing the Caffeine and Price columns",
@@ -252,6 +380,52 @@ test("suggestTools does not pull in extra template list companions when a locato
   ).map((tool) => tool.chatName);
   assert.ok(formulaFollowUp.includes("rg_add_formula"), formulaFollowUp.join());
   assert.equal(formulaFollowUp.includes("rg_list_templates"), false, formulaFollowUp.join());
+
+  // Locator is chosen by score first (highest score beats earlier registration order),
+  // and a template tool is never selected as a companion.
+  const custom = buildChatCatalog({
+    registryExtensions: [
+      simpleExt("widgets", "Widgets", [
+        { name: "w_list_templates", readOnly: true, description: "List saved widget templates." },
+        { name: "w_list_alpha", readOnly: true, description: "List alpha entries." },
+        { name: "w_search_sprockets", readOnly: true, description: "Search sprockets by label." },
+        { name: "w_update_sprocket", readOnly: false, description: "Update a sprocket calibration value." },
+      ]),
+    ],
+    extensionAPI: settingsApi(allOn(["widgets"])),
+  });
+  const picked = suggestTools(custom, "Update sprocket calibration", { access: "edit", max: 2 }).map((t) => t.chatName);
+  assert.deepEqual(picked, ["w_update_sprocket", "w_search_sprockets"]);
+
+  const onlyTemplate = buildChatCatalog({
+    registryExtensions: [
+      simpleExt("tmpl-only", "Template Only", [
+        { name: "t_list_templates", readOnly: true, description: "List saved templates." },
+        { name: "t_apply_blueprint_schematic", readOnly: false, description: "Apply a blueprint schematic diagram." },
+      ]),
+    ],
+    extensionAPI: settingsApi(allOn(["tmpl-only"])),
+  });
+  const noTemplateCompanion = suggestTools(onlyTemplate, "Apply blueprint schematic diagram", { access: "edit" }).map((t) => t.chatName);
+  assert.deepEqual(noTemplateCompanion, ["t_apply_blueprint_schematic"]);
+});
+
+test("isDestructiveToolName flags deleting and bulk tool names and flows into catalog entries and signature", () => {
+  for (const name of ["bt_delete", "bt_bulk_snooze", "rg_delete_rows", "rg_restore_native", "clear_cache", "archive-old", "dropTable_wipe"]) {
+    assert.equal(isDestructiveToolName(name), true, name);
+  }
+  for (const name of ["bt_create", "rg_set_cell", "rg_sort", "rg_list_grids", "bt_search"]) {
+    assert.equal(isDestructiveToolName(name), false, name);
+  }
+  // Uses the original tool name, not a prefixed chat name from an extension key.
+  const ext = [simpleExt("delete-ext", "Delete Ext", [{ name: "search" }, { name: "remove_entry" }])];
+  const catalog = buildChatCatalog({ registryExtensions: ext, extensionAPI: settingsApi(allOn(["delete-ext"])) });
+  const renamed = catalog.tools.find((t) => t.name === "search");
+  assert.equal(renamed.chatName, "delete-ext__search");
+  assert.equal(renamed.destructive, false);
+  const destructive = catalog.tools.find((t) => t.name === "remove_entry");
+  assert.equal(destructive.destructive, true);
+  assert.ok(catalog.signature.includes("true") && catalog.signature.includes("false"));
 });
 
 test("suggestTools stays quiet for requests that need no extension", () => {
@@ -348,6 +522,10 @@ test("renderIndexSection returns nothing without tools and marks writing tools",
   assert.match(text, /rg_sort\*/);
   assert.match(text, /rg_get_grid(?!\*)/);
   assert.match(text, new RegExp(FIND_TOOL_NAME));
+  assert.match(
+    text,
+    /A tool that is already in your tool list can be called directly\.[^\n]*\nTools are put in your list by matching words in the person's message, so a tool being there does not mean it is wanted\. Use one only when the request is really about what that extension manages\./,
+  );
   assert.doesNotMatch(text, /read-only/);
 });
 

@@ -16,18 +16,30 @@ const MAX_SHORT_DESCRIPTION_CHARS = 300;
 const MAX_SUMMARY_CHARS = 140;
 const MAX_INDEX_NAMES_PER_EXTENSION = 40;
 const MAX_INDEX_NAMES_TOTAL = 160;
-const MAX_QUERY_TOKENS = 60;
-const MAX_QUERY_HEAD_TOKENS = 25;
+const MAX_QUERY_TOKENS = 120;
+const MAX_QUERY_HEAD_TOKENS = 50;
 const MAX_QUERY_TAIL_TOKENS = MAX_QUERY_TOKENS - MAX_QUERY_HEAD_TOKENS;
 const CHAT_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HUB_SIGNATURE_NAMES = ["list_extensions", "describe_tools", "run_read_tool"];
 const COMPANION_NAME_TOKENS = new Map([["search", 2], ["list", 2], ["find", 2], ["get", 1], ["read", 1]]);
+const QUERY_ALIASES = new Map([
+  ["whiteboard", ["board"]],
+  ["spreadsheet", ["table", "grid"]],
+  ["datagrid", ["grid"]],
+  ["subtask", ["task"]],
+  ["todo", ["task"]],
+]);
+const DESTRUCTIVE_NAME_TOKENS = new Set([
+  "delete", "remove", "clear", "drop", "destroy", "purge", "wipe", "reset", "restore", "archive", "bulk",
+]);
+const NOT_OFFERED_REASON = "Not available in this turn. Ask again in your next message.";
 // Words that say what to do but not what to do it to. They help order tools inside one
 // extension and count for little when deciding whether an extension is relevant at all.
 const GENERIC_TOKENS = new Set([
   "list", "get", "create", "add", "set", "delete", "remove", "find", "search", "update", "modify",
   "insert", "apply", "return", "read", "write", "change", "edit", "open", "run", "export", "name",
   "value", "text", "item", "thing", "first", "last", "next", "current", "today", "day",
+  "detailed", "detail", "suggest", "suggestion", "manage", "summary",
 ]);
 const GENERIC_TOKEN_WEIGHT = 0.4;
 
@@ -173,20 +185,20 @@ export function tokenize(text) {
   return out;
 }
 
+export function isDestructiveToolName(name) {
+  return String(name ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some((token) => DESTRUCTIVE_NAME_TOKENS.has(token));
+}
+
 function tokensMatch(queryToken, docToken) {
   if (queryToken === docToken) return true;
   const shorter = Math.min(queryToken.length, docToken.length);
   if (shorter < 4) return false;
   let common = 0;
   while (common < shorter && queryToken.charCodeAt(common) === docToken.charCodeAt(common)) common += 1;
-  if (common >= Math.max(4, shorter - 1)) return true;
-  // A long compound query word whose suffix is a specific known word ("whiteboard" -> "board").
-  return (
-    docToken.length >= 5
-    && queryToken.length >= docToken.length + 3
-    && !GENERIC_TOKENS.has(docToken)
-    && queryToken.endsWith(docToken)
-  );
+  return common >= Math.max(4, shorter - 1);
 }
 
 function buildSearchIndex(tools) {
@@ -221,19 +233,37 @@ export function rankTools(catalog, text) {
   const ranked = [];
   for (const doc of docs) {
     let score = 0;
+    let specific = false;
     for (const queryToken of queryTokens) {
+      const aliases = QUERY_ALIASES.get(queryToken);
       let best = 0;
+      let bestSpecific = false;
       for (const field of doc.fields) {
         for (const token of field.tokens) {
-          if (!tokensMatch(queryToken, token)) continue;
-          const generic = GENERIC_TOKENS.has(queryToken) || GENERIC_TOKENS.has(token);
-          const value = idf(token) * field.weight * (generic ? GENERIC_TOKEN_WEIGHT : 1);
-          if (value > best) best = value;
+          if (tokensMatch(queryToken, token)) {
+            const generic = GENERIC_TOKENS.has(queryToken) || GENERIC_TOKENS.has(token);
+            const value = idf(token) * field.weight * (generic ? GENERIC_TOKEN_WEIGHT : 1);
+            if (value > best) {
+              best = value;
+              bestSpecific = !generic;
+            }
+          }
+          if (aliases) {
+            for (const alias of aliases) {
+              if (!tokensMatch(alias, token)) continue;
+              const value = idf(token) * field.weight;
+              if (value > best) {
+                best = value;
+                bestSpecific = true;
+              }
+            }
+          }
         }
       }
       score += best;
+      if (bestSpecific) specific = true;
     }
-    if (score > 0) ranked.push({ tool: doc.tool, score });
+    if (score > 0) ranked.push({ tool: doc.tool, score, specific });
   }
   ranked.sort((a, b) => b.score - a.score || a.tool.order - b.tool.order);
   return ranked;
@@ -315,6 +345,7 @@ export function buildChatCatalog({
         description: tool.description || "",
         shortDescription: tool.shortDescription || truncateText(tool.description || "", MAX_SHORT_DESCRIPTION_CHARS),
         readOnly: tool.readOnly === true,
+        destructive: isDestructiveToolName(tool.name),
         parameters: cloneSchema(tool.parameters),
         order: tools.length,
       };
@@ -338,7 +369,7 @@ export function buildChatCatalog({
     ext.summary,
     ext.guide,
     ext.hiddenWriteCount,
-    ext.tools.map((tool) => [tool.chatName, tool.id, tool.readOnly, tool.description, tool.parameters]),
+    ext.tools.map((tool) => [tool.chatName, tool.id, tool.readOnly, tool.destructive, tool.description, tool.parameters]),
   ]));
 
   return {
@@ -385,6 +416,9 @@ export function renderIndexSection(catalog, { access = "edit", loadedNames = [] 
   lines.push(
     `A tool that is already in your tool list can be called directly. To use any other, first call ${FIND_TOOL_NAME} with its names from the lists above, or with a few words describing the task; the tools are then added to your tool list for your next step.`,
   );
+  lines.push(
+    "Tools are put in your list by matching words in the person's message, so a tool being there does not mean it is wanted. Use one only when the request is really about what that extension manages.",
+  );
   if (access === "read") lines.push("This chat is read-only, so only tools that read are listed.");
 
   const loaded = new Set(loadedNames);
@@ -407,7 +441,9 @@ function extensionMatches(tool, filter) {
 }
 
 function companionRank(tool) {
-  return Math.max(0, ...tool.name.toLowerCase().split(/[^a-z0-9]+/).map((token) => COMPANION_NAME_TOKENS.get(token) ?? 0));
+  const lower = tool.name.toLowerCase();
+  if (lower.includes("template")) return 0;
+  return Math.max(0, ...lower.split(/[^a-z0-9]+/).map((token) => COMPANION_NAME_TOKENS.get(token) ?? 0));
 }
 
 /**
@@ -416,14 +452,15 @@ function companionRank(tool) {
  */
 export function suggestTools(catalog, text, { access = "edit", exclude = [], max = MAX_PRELOAD } = {}) {
   const skip = new Set(exclude);
-  const ranked = rankTools(catalog, text).filter((row) => isToolAllowed(row.tool, access));
+  const allRanked = rankTools(catalog, text);
+  const ranked = allRanked.filter((row) => isToolAllowed(row.tool, access) && row.specific);
   if (ranked.length === 0 || ranked[0].score < PRELOAD_MIN_SCORE) return [];
   const floor = Math.max(PRELOAD_MIN_SCORE, ranked[0].score * PRELOAD_RELATIVE_SCORE);
   const primary = ranked.filter((row) => row.score >= floor).slice(0, Math.max(1, max - 2)).map((row) => row.tool);
 
   const picked = [...primary];
   const pickedNames = new Set(picked.map((tool) => tool.chatName));
-  const scoreByName = new Map(ranked.map((row) => [row.tool.chatName, row.score]));
+  const scoreByName = new Map(allRanked.map((row) => [row.tool.chatName, row.score]));
   for (const extensionKey of new Set(primary.map((tool) => tool.extensionKey))) {
     if (picked.length >= max) break;
     // One locator (search/list/find) and one reader (get/read) per extension, unless one is
@@ -441,7 +478,9 @@ export function suggestTools(catalog, text, { access = "edit", exclude = [], max
       .filter((row) => row.rank > 0);
     const locator = hasLocator
       ? null
-      : candidates.filter((row) => row.rank === 2).sort((a, b) => a.tool.order - b.tool.order)[0];
+      : candidates
+        .filter((row) => row.rank === 2)
+        .sort((a, b) => (scoreByName.get(b.tool.chatName) ?? 0) - (scoreByName.get(a.tool.chatName) ?? 0) || a.tool.order - b.tool.order)[0];
     const reader = hasReader
       ? null
       : candidates
@@ -460,7 +499,7 @@ export function suggestTools(catalog, text, { access = "edit", exclude = [], max
  * The `find_extension_tools` tool body. Returns what the model reads (`payload`) and the
  * chat tool names to load (`load`).
  */
-export function findExtensionTools(args, { catalog, access = "edit", guidesSent = new Set() } = {}) {
+export function findExtensionTools(args, { catalog, access = "edit", guidesSent = new Set(), offered = null } = {}) {
   const requestedNames = Array.isArray(args?.names)
     ? args.names.filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim())
     : [];
@@ -468,10 +507,12 @@ export function findExtensionTools(args, { catalog, access = "edit", guidesSent 
   const extension = typeof args?.extension === "string" ? args.extension.trim() : "";
   const rawLimit = Number.isInteger(args?.limit) ? args.limit : DEFAULT_LOAD_LIMIT;
   const limit = Math.max(1, Math.min(MAX_LOAD_LIMIT, rawLimit));
+  const offeredSet = offered instanceof Set ? offered : Array.isArray(offered) ? new Set(offered) : null;
 
   const selected = [];
   const notLoaded = [];
   let totalMatched = 0;
+  let consideredCount = 0;
 
   if (requestedNames.length > 0) {
     for (const rawName of requestedNames.slice(0, MAX_LOAD_LIMIT)) {
@@ -481,11 +522,16 @@ export function findExtensionTools(args, { catalog, access = "edit", guidesSent 
         notLoaded.push({ name: rawName, reason: "No such tool. Use a name from the extension tools list." });
       } else if (!isToolAllowed(tool, access)) {
         notLoaded.push({ name: tool.chatName, reason: "This chat is read-only and that tool changes the graph." });
+      } else if (offeredSet && !offeredSet.has(tool.chatName)) {
+        if (!notLoaded.some((row) => row.name === tool.chatName)) {
+          notLoaded.push({ name: tool.chatName, reason: NOT_OFFERED_REASON });
+        }
       } else if (!selected.includes(tool)) {
         selected.push(tool);
       }
     }
     totalMatched = selected.length;
+    consideredCount = selected.length;
   } else {
     let candidates;
     if (query) {
@@ -501,7 +547,15 @@ export function findExtensionTools(args, { catalog, access = "edit", guidesSent 
     }
     candidates = candidates.filter((tool) => extensionMatches(tool, extension) && isToolAllowed(tool, access));
     totalMatched = candidates.length;
-    selected.push(...candidates.slice(0, limit));
+    const considered = candidates.slice(0, limit);
+    consideredCount = considered.length;
+    for (const tool of considered) {
+      if (offeredSet && !offeredSet.has(tool.chatName)) {
+        notLoaded.push({ name: tool.chatName, reason: NOT_OFFERED_REASON });
+      } else {
+        selected.push(tool);
+      }
+    }
   }
 
   const guides = {};
@@ -524,12 +578,14 @@ export function findExtensionTools(args, { catalog, access = "edit", guidesSent 
   };
   if (Object.keys(guides).length > 0) payload.guides = guides;
   if (notLoaded.length > 0) payload.not_loaded = notLoaded;
-  if (totalMatched > selected.length) {
-    payload.more = `${totalMatched - selected.length} more matched. Narrow the query, name an extension, or pass exact names.`;
+  if (totalMatched > consideredCount) {
+    payload.more = `${totalMatched - consideredCount} more matched. Narrow the query, name an extension, or pass exact names.`;
   }
   payload.note = selected.length > 0
     ? "These tools are in your tool list from your next step, with their full parameters. Call them directly."
-    : `Nothing matched. Extensions available: ${catalog.extensions.map((ext) => ext.name).join(", ") || "none"}.`;
+    : notLoaded.length > 0
+      ? "No tools were loaded in this turn. See not_loaded for details."
+      : `Nothing matched. Extensions available: ${catalog.extensions.map((ext) => ext.name).join(", ") || "none"}.`;
 
   return { payload, load: selected.map((tool) => tool.chatName) };
 }

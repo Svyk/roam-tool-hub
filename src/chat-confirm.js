@@ -73,11 +73,11 @@ export function createChatConfirm({ documentRef = globalThis.document } = {}) {
 
     const footer = element("div", "bp3-dialog-footer");
     const actions = element("div", "bp3-dialog-footer-actions");
-    const buttons = [
-      ["Deny", "bp3-button", "deny"],
-      [`Always allow ${extensionName}`, "bp3-button", "always"],
-      ["Allow once", "bp3-button bp3-intent-primary", "once"],
-    ];
+    const buttons = [["Deny", "bp3-button", "deny"]];
+    if (request.allowChat !== false) {
+      buttons.push([`Allow ${extensionName} in this chat`, "bp3-button", "chat"]);
+    }
+    buttons.push(["Allow once", "bp3-button bp3-intent-primary", "once"]);
     for (const [label, className, decision] of buttons) {
       const button = element("button", className, label);
       button.setAttribute("type", "button");

@@ -216,7 +216,7 @@ export function createSettingsPanel({
       settings.push(chatAutoRow(
         ext,
         ext.name,
-        `Skip the confirm dialog when the built-in chat runs a writing tool from ${ext.key}. Default off.`,
+        `Skip the confirm dialog when the built-in chat runs a writing tool from ${ext.key}. Tools that delete, or change things in bulk, still ask. Default off.`,
       ));
     }
   }
@@ -250,7 +250,7 @@ export function createSettingsPanel({
       settings.push(chatAutoRow(
         ext,
         label,
-        `Skip the confirm dialog when the built-in chat runs a writing tool from ${ext.key}. The switch applies to the built-in chat bridge only, since MCP clients already see native tools directly. Default off.`,
+        `Skip the confirm dialog when the built-in chat runs a writing tool from ${ext.key}. Tools that delete, or change things in bulk, still ask. The switch applies to the built-in chat bridge only, since MCP clients already see native tools directly. Default off.`,
       ));
     }
   }

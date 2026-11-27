@@ -128,3 +128,25 @@ test("switching the bridge on without a Roam runtime waits quietly and unload tu
     else globalThis.window = priorWindow;
   }
 });
+
+test("onload handles a rejecting getGraphGuidelines in the settings panel while letting the bridge see failures", async () => {
+  const api = fakeExtensionApi();
+  const priorWindow = globalThis.window;
+  globalThis.window = {
+    roamAlphaAPI: {
+      data: {
+        ai: {
+          getGraphGuidelines: async () => { throw new Error("ai unavailable"); },
+        },
+      },
+    },
+  };
+  try {
+    const cleanup = await extension.onload({ extensionAPI: api, extension: { version: "0.4.1-test" } });
+    assert.equal(api.registeredTools.size, 5);
+    await cleanup();
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});

@@ -36,6 +36,7 @@ const ROAM_EXTENSION_NAME = "roam";
 const ROAM_CHAT_MARKER_TOOLS = ["get_page", "search"];
 const NATIVE_TOOLS_TTL_MS = 15_000;
 const NATIVE_TOOLS_TIMEOUT_MS = 4_000;
+const NATIVE_TOOLS_TURN_WAIT_MS = 1_500;
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const MAX_LOADED_PER_CONVERSATION = 24;
 const MAX_TRACKED_CONVERSATIONS = 200;
@@ -81,6 +82,14 @@ function withTimeout(promise, ms, label) {
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function waitUpTo(promise, ms) {
+  let timer;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([promise, stop]).finally(() => clearTimeout(timer));
 }
 
 /** Returns a reason string when the chat runtime does not look the way this bridge needs. */
@@ -137,12 +146,12 @@ export function createChatBridge({
   confirmWrite,
   isAutoLoadEnabled = () => true,
   isChatAutoApproved = () => false,
-  setChatAutoApproved = async () => {},
   readBlockText = () => "",
   onStatus,
   maxResultChars = MAX_RESULT_CHARS,
   nativeToolsTimeoutMs = NATIVE_TOOLS_TIMEOUT_MS,
   nativeToolsTtlMs = NATIVE_TOOLS_TTL_MS,
+  nativeToolsTurnWaitMs = NATIVE_TOOLS_TURN_WAIT_MS,
   logger = console,
 } = {}) {
   // Without a window (unit tests, a non-browser host) the bridge still builds and reports
@@ -195,12 +204,16 @@ export function createChatBridge({
   // ---- per-conversation memory -------------------------------------------------
 
   function conversationState(id) {
-    if (id === undefined || id === null) return { access: undefined, loaded: new Set(), guidesSent: new Set() };
+    if (id === undefined || id === null) {
+      return { access: undefined, loaded: new Set(), guidesSent: new Set(), offered: new Set(), approved: new Set() };
+    }
     let conv = state.conversations.get(id);
     if (conv) {
       state.conversations.delete(id);
+      if (!(conv.offered instanceof Set)) conv.offered = new Set();
+      if (!(conv.approved instanceof Set)) conv.approved = new Set();
     } else {
-      conv = { access: undefined, loaded: new Set(), guidesSent: new Set(), probed: false };
+      conv = { access: undefined, loaded: new Set(), guidesSent: new Set(), offered: new Set(), approved: new Set(), probed: false };
     }
     state.conversations.set(id, conv);
     while (state.conversations.size > MAX_TRACKED_CONVERSATIONS) {
@@ -226,6 +239,7 @@ export function createChatBridge({
   // ---- catalog -----------------------------------------------------------------
 
   function applyCatalog(nativeTools, { force = false } = {}) {
+    if (!attached) return;
     const snapshot = getRegistrySnapshot();
     const next = buildChatCatalog({
       registryExtensions: snapshot?.extensions ?? [],
@@ -245,50 +259,48 @@ export function createChatBridge({
     nativeRefreshing = (async () => {
       try {
         const tools = await withTimeout(
-          Promise.resolve(getNativeTools()),
+          Promise.resolve().then(() => getNativeTools()),
           nativeToolsTimeoutMs,
           "Reading native extension tools",
         );
-        nativeCache = { at: Date.now(), tools: Array.isArray(tools) ? tools : [], ready: true };
-        return true;
+        nativeCache = { tools: Array.isArray(tools) ? tools : [], ready: true, at: Date.now() };
       } catch (error) {
-        warnOnce("native extension tools could not be read", error);
-        nativeCache = { at: Date.now(), tools: nativeCache.tools, ready: true };
-        return false;
+        nativeCache = { tools: nativeCache.tools, ready: nativeCache.ready, at: Date.now() };
+        if (attached) warnOnce("native extension tools could not be read", error);
       } finally {
         nativeRefreshing = null;
       }
+      return nativeCache.tools;
     })();
     return nativeRefreshing;
   }
 
-  function revalidateNativeTools() {
-    if (nativeRefreshing) return;
-    void fetchNativeTools().then((ok) => {
-      if (!attached || !ok) return;
-      try {
-        applyCatalog(nativeCache.tools);
-      } catch (error) {
-        warnOnce("updating native extension tools failed", error);
-      }
-    });
-  }
-
   async function readNativeTools(force) {
-    if (!nativeCache.ready) {
+    if (force) {
       await fetchNativeTools();
       return nativeCache.tools;
     }
-    if (force || Date.now() - nativeCache.at >= nativeToolsTtlMs) {
-      revalidateNativeTools();
+    if (!nativeCache.ready) {
+      if (!nativeRefreshing && (nativeCache.at === 0 || Date.now() - nativeCache.at >= nativeToolsTtlMs)) {
+        void fetchNativeTools();
+      }
+      if (nativeRefreshing) {
+        await waitUpTo(nativeRefreshing, nativeToolsTurnWaitMs);
+      }
+      return nativeCache.tools;
+    }
+    if (Date.now() - nativeCache.at >= nativeToolsTtlMs) {
+      void fetchNativeTools();
     }
     return nativeCache.tools;
   }
 
   function refresh({ force = false } = {}) {
-    if (refreshing) return force ? refreshing.then(() => refresh({ force })) : refreshing;
+    if (!attached) return Promise.resolve();
+    if (refreshing) return force ? refreshing.then(() => (attached ? refresh({ force }) : undefined)) : refreshing;
     refreshing = (async () => {
       const native = await readNativeTools(force);
+      if (!attached) return;
       applyCatalog(native, { force });
     })().finally(() => {
       refreshing = null;
@@ -301,12 +313,14 @@ export function createChatBridge({
   async function runFind(args, context) {
     stats.finds += 1;
     const conv = conversationState(context?.conversationId);
+    const offered = new Set([...conv.offered].filter((name) => installedNames.has(name)));
     const { payload, load } = findExtensionTools(args, {
       catalog,
       access: conv.access ?? "edit",
       guidesSent: conv.guidesSent,
+      offered,
     });
-    const usable = load.filter((name) => installedNames.has(name));
+    const usable = load.filter((name) => offered.has(name));
     rememberLoaded(conv, usable);
     const result = textResult(payload, false);
     result.details = { found: payload.tools.length };
@@ -353,9 +367,11 @@ export function createChatBridge({
         stats.blocked += 1;
         return { block: READ_ONLY_MESSAGE };
       }
-      // A chat this session has not seen configured (for example one resumed after a
-      // reload) always asks, whatever the extension's setting says.
-      if (conv?.access && isChatAutoApproved(entry.extensionKey)) return undefined;
+      // Destructive tools and chats this session has not seen configured always ask.
+      const mayRemember = !entry.destructive && Boolean(conv?.access);
+      if (mayRemember && (isChatAutoApproved(entry.extensionKey) || conv.approved?.has(entry.extensionKey))) {
+        return undefined;
+      }
       if (typeof confirmWrite !== "function") {
         stats.blocked += 1;
         return { block: "Tool Hub has no way to ask the person to confirm this change, so it was not made." };
@@ -367,10 +383,12 @@ export function createChatBridge({
         extensionName: entry.extensionName,
         description: entry.shortDescription,
         args: isPlainObject(call.arguments) ? call.arguments : {},
+        allowChat: mayRemember,
         signal: context?.abortSignal ?? task?.signal,
       });
-      if (decision === "always") {
-        await setChatAutoApproved(entry.extensionKey, true);
+      if (decision === "chat" && mayRemember) {
+        if (!(conv.approved instanceof Set)) conv.approved = new Set();
+        conv.approved.add(entry.extensionKey);
         return undefined;
       }
       if (decision === "once") return undefined;
@@ -482,7 +500,9 @@ export function createChatBridge({
     stats.turns += 1;
     const conv = conversationState(conversation.id);
     conv.access = deriveChatAccess(roamNames);
+    conv.offered = new Set();
     await refresh();
+    if (!attached) return config;
 
     if (!conv.probed) {
       conv.probed = true;
@@ -494,30 +514,36 @@ export function createChatBridge({
       } catch (error) {
         warnOnce("probing the conversation failed", error);
       }
+      if (!attached) return config;
     }
 
     const taken = new Set(roamNames);
     const allowed = catalog.tools.filter((tool) => (
       installedNames.has(tool.chatName) && !taken.has(tool.chatName) && (tool.readOnly || conv.access !== "read")
     ));
-    if (allowed.length === 0 || !installedNames.has(FIND_TOOL_NAME)) return config;
+    if (allowed.length === 0 || !installedNames.has(FIND_TOOL_NAME)) {
+      conv.offered = new Set();
+      return config;
+    }
 
+    const offeredNames = allowed.map((tool) => tool.chatName);
+    conv.offered = new Set(offeredNames);
     const next = {
       ...config,
-      tools: [...config.tools, { name: FIND_TOOL_NAME }, ...allowed.map((tool) => ({ name: tool.chatName }))],
+      tools: [...config.tools, { name: FIND_TOOL_NAME }, ...offeredNames.map((name) => ({ name }))],
     };
     if (config.modelTools === undefined) {
-      const allowedNames = new Set(allowed.map((tool) => tool.chatName));
-      const loaded = [...conv.loaded].filter((name) => allowedNames.has(name));
+      const loaded = [...conv.loaded].filter((name) => conv.offered.has(name));
       if (loaded.length > 0) next.modelTools = { add: loaded.map((name) => ({ name })) };
     }
     return next;
   }
 
   async function verifyTurn(conversation, context) {
-    if (state.status.verified === true) return;
+    if (!attached || state.status.verified === true) return;
     try {
       const agent = await conversation.agent(context);
+      if (!attached) return;
       const names = (agent?.tools ?? []).map((tool) => tool?.name);
       setStatus({ verified: names.includes(FIND_TOOL_NAME) });
     } catch {
@@ -529,6 +555,8 @@ export function createChatBridge({
     if (!isAutoLoadEnabled() || input?.type !== "input" || catalog.tools.length === 0) return;
     const conv = peekConversation(conversation.id);
     if (!conv?.access) return;
+    const offered = conv.offered instanceof Set ? conv.offered : new Set();
+    if (offered.size === 0) return;
     let text = extractText(input.content);
     const blockRun = BLOCK_RUN_UID_RE.exec(text);
     // Ask AI on a block wraps the request in fixed wording; only the block's own text
@@ -537,14 +565,15 @@ export function createChatBridge({
     if (!text.trim()) return;
     const picks = suggestTools(catalog, text, { access: conv.access, exclude: [...conv.loaded], max: MAX_PRELOAD })
       .map((tool) => tool.chatName)
-      .filter((name) => installedNames.has(name));
+      .filter((name) => offered.has(name) && installedNames.has(name));
     if (picks.length === 0) return;
     rememberLoaded(conv, picks);
     const activeLoaded = [...conv.loaded].filter((name) => {
-      if (!installedNames.has(name)) return false;
+      if (!offered.has(name) || !installedNames.has(name)) return false;
       const entry = catalog.byName.get(name);
       return Boolean(entry && (entry.readOnly || conv.access !== "read"));
     });
+    if (activeLoaded.length === 0) return;
     await originalConfigure.call(
       conversation,
       { modelTools: { add: activeLoaded.map((name) => ({ name })) } },
@@ -569,6 +598,8 @@ export function createChatBridge({
       try {
         result = await original.call(conversation, next, context);
       } catch (error) {
+        const conv = peekConversation(conversation.id);
+        if (conv) conv.offered = new Set();
         warnOnce("Roam rejected the extended tool list", error);
         return original.call(conversation, config, context);
       }
@@ -690,10 +721,11 @@ export function createChatBridge({
         if (!state.patches.conversation) state.patches.conversation = patchConversationPrototype(proto);
       }
       for (const registry of state.registries) installInto(registry);
-      if (state.status.phase !== "attached" && state.status.phase !== "failed") {
+      if (attached && state.status.phase !== "attached" && state.status.phase !== "failed") {
         setStatus({ phase: "ready", detail: "" });
       }
     } catch (error) {
+      if (!attached) return;
       fail(`Roam's chat runtime changed: ${errorMessage(error)}`, error);
     }
   }

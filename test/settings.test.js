@@ -162,7 +162,7 @@ test("createSettingsPanel orders the chat rows, hides the write-free switch, and
   assert.equal(byId.has(extensionChatAutoSettingId("readers")), false);
   const gridAuto = byId.get(extensionChatAutoSettingId("roam-grid"));
   assert.equal(gridAuto.name, "Roam Grid — chat may change the graph without asking");
-  assert.match(gridAuto.description, /Skip the confirm dialog when the built-in chat runs a writing tool from roam-grid\. Default off\./);
+  assert.match(gridAuto.description, /Skip the confirm dialog when the built-in chat runs a writing tool from roam-grid\. Tools that delete, or change things in bulk, still ask\. Default off\./);
   gridAuto.action.onChange({ target: { checked: true } });
 
   const nativeKey = "native:https://x.github.io/plexus-diagram/";
@@ -170,6 +170,7 @@ test("createSettingsPanel orders the chat rows, hides the write-free switch, and
   assert.ok(byId.has(extensionWriteSettingId(nativeKey)));
   const nativeAuto = byId.get(extensionChatAutoSettingId(nativeKey));
   assert.match(nativeAuto.name, /^Plexus Diagram \(native AI tools\) — /);
+  assert.match(nativeAuto.description, /Tools that delete, or change things in bulk, still ask\./);
   assert.match(nativeAuto.description, /built-in chat bridge only/);
   nativeAuto.action.onChange({ target: { checked: true } });
 

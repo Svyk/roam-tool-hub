@@ -6,13 +6,18 @@ All notable changes to this project follow [Keep a Changelog](https://keepachang
 
 ## [0.4.1] - 2026-11-27
 
+### Changed
+
+- The write confirmation dialog now offers **Deny**, **Allow `<Extension>` in this chat**, and **Allow once**. In-chat approval stays in memory for that extension and conversation only. Permanent auto-approval lives in Settings.
+- Writing tools whose names indicate deletion, reset, restore, archive, clear, or bulk changes always open the confirmation dialog with only **Deny** and **Allow once**, even when an extension is approved for the chat or in Settings.
+
 ### Fixed
 
-- Auto-load now matches compound query words that end with a specific tool word (for example, "whiteboards" matches `list_boards` and `read_board`) without matching generic action suffixes like "proofread" or "checklist".
-- Native extension tool discovery is now stale-while-revalidate: the first read waits up to 4 seconds instead of timing out at 1.5 seconds, and later stale reads return the cached list immediately while refreshing in the background and reinstalling only when the list changes.
-- Long prompts over 60 unique tokens now keep both the start and end of the message when ranking tools, so requests written after pasted context still auto-load the right tools.
-- Auto-load companion selection no longer pulls in extra `list_*` tools (such as `bt_list_templates` or `rg_list_templates`) when a locator is already selected or loaded, and generic matched tokens (`export`, `name`) are weighted down consistently.
-- Preload `modelTools.add` updates now filter carried-over loaded names against the active catalog and conversation access mode, matching `configure`.
+- Auto-load uses a small alias map (`whiteboard`, `spreadsheet`, `datagrid`, `subtask`, `todo`) and wider generic-word down-weighting (`export`, `name`, `detailed`, `detail`, `suggest`, `suggestion`, `manage`, `summary`) so common words match the right extension tools without loading unrelated tools on ordinary notes.
+- Long prompts over 120 unique tokens now keep the first 50 and last 70 tokens when ranking tools, so requests written in the middle or after pasted context still match.
+- Companion selection never treats `*_template*` tools as locators or readers, picks locators by score first, and skips extra companions when a locator or reader is already selected or loaded. The prompt section also reminds the model that preloaded tools came from word matching and should be used only when the request fits.
+- Native extension tool reads now retry after a failed first read, wait at most 1.5 seconds on a turn, and never change the active catalog mid-turn from a background fetch. A detached bridge no longer writes shared status or logs warnings after unload.
+- Preload and `find_extension_tools` only load tools that were offered in the current turn's tool list, reporting newly appeared tools under `not_loaded` until the next message.
 
 ## [0.4.0] - 2026-11-27
 
