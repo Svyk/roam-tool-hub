@@ -5,12 +5,15 @@
  * Unknown keywords pass silently.
  */
 
-function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+export function isPlainObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
 function deepEqual(a, b) {
-  if (Object.is(a, b)) return true;
+  if (a === b) return true;
+  if (Number.isNaN(a) && Number.isNaN(b)) return true;
   if (a === null || b === null || typeof a !== typeof b) return false;
   if (typeof a !== "object") return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
@@ -57,6 +60,9 @@ function describeType(value) {
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";
   if (typeof value === "number" && Number.isNaN(value)) return "NaN";
+  if (typeof value === "object" && !isPlainObject(value)) {
+    return value.constructor?.name || "object";
+  }
   return typeof value;
 }
 
@@ -136,10 +142,14 @@ function validateNode(value, schema, path, errors) {
     }
 
     const properties = isPlainObject(schema.properties) ? schema.properties : null;
+    const hasPatternProps = isPlainObject(schema.patternProperties)
+      && Object.keys(schema.patternProperties).length > 0;
     for (const [key, propValue] of Object.entries(value)) {
       const childPath = path === "$" ? `$.${key}` : `${path}.${key}`;
       if (properties && Object.prototype.hasOwnProperty.call(properties, key)) {
         validateNode(propValue, properties[key], childPath, errors);
+      } else if (hasPatternProps) {
+        // patternProperties is outside our subset; avoid false-rejecting matched keys.
       } else if (schema.additionalProperties === false) {
         errors.push(`${childPath}: additional property is not allowed`);
       } else if (isPlainObject(schema.additionalProperties)) {

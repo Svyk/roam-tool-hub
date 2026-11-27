@@ -6,6 +6,7 @@ import {
   buildGuidelinesIndexModel,
   GUIDELINES_HEADING,
   removeGuidelinesIndex,
+  sanitizeRoamMarkup,
   syncGuidelinesIndex,
 } from "../src/guidelines-index.js";
 import { extensionEnabledSettingId, extensionWriteSettingId } from "../src/settings.js";
@@ -272,4 +273,77 @@ test("above 20 enabled extensions writes grouped counts and points at list_exten
     "Other: 4 extensions (8 tools)",
     "Total: 22 enabled extensions (44 tools). Call list_extensions to browse them.",
   ]);
+});
+
+test("sanitizeRoamMarkup neutralizes macros, tags, refs, and attributes", () => {
+  const clean = sanitizeRoamMarkup("Plot {{plot}} #TimeBlock HQ:: [[Page]] ((abc123456))");
+  assert.doesNotMatch(clean, /\{\{|\[\[|\(\(|::/);
+  assert.match(clean, /`#TimeBlock`/);
+});
+
+test("boot sync (allowShrink: false) preserves populated index when extensions have not loaded yet, and read-only canSet refuses writes", async () => {
+  const api = makeFakeExtensionAPI({ [SETTING_IDS.guidelinesEnabled]: true });
+  const graph = makeFakeRoamGraph({ initialGuidelinesBlocks: [] });
+  const registry = {
+    "a": { name: "A", tools: [{ name: "t1", readOnly: true, description: "One.", execute: () => ({}) }] },
+    "b": { name: "B", tools: [{ name: "t2", readOnly: true, description: "Two.", execute: () => ({}) }] },
+  };
+  await syncGuidelinesIndex({ extensionAPI: api, roamAlphaAPI: graph.roamAlphaAPI, getRegistry: () => registry });
+  const writesBefore = graph.writes.length;
+
+  // Simulate boot before extensions register (empty registry, allowShrink: false)
+  const bootEmpty = await syncGuidelinesIndex({
+    extensionAPI: api,
+    roamAlphaAPI: graph.roamAlphaAPI,
+    getRegistry: () => ({}),
+    allowShrink: false,
+  });
+  assert.equal(bootEmpty.status, "preserved-on-boot");
+  assert.equal(graph.writes.length, writesBefore);
+
+  // Read-only settings cannot persist uid -> refuses writes cleanly
+  api.settings.canSet = false;
+  const ro = await syncGuidelinesIndex({
+    extensionAPI: api,
+    roamAlphaAPI: graph.roamAlphaAPI,
+    getRegistry: () => registry,
+  });
+  assert.equal(ro.status, "read-only-settings");
+  assert.equal(graph.writes.length, writesBefore);
+});
+
+test("finds and removes an owned guidelines block even when indented under another block on the page", async () => {
+  const api = makeFakeExtensionAPI({
+    [SETTING_IDS.guidelinesEnabled]: true,
+    [SETTING_IDS.guidelinesBlockUid]: "indented-owned",
+  });
+  const deleted = [];
+  const roamAlphaAPI = {
+    graph: { name: "Readwisenotes" },
+    util: { generateUID: () => "u-x" },
+    data: {
+      pull: (_pattern, entity) => {
+        if (entity[0] === ":block/uid" && entity[1] === "indented-owned") {
+          return {
+            ":block/uid": "indented-owned",
+            ":block/string": GUIDELINES_HEADING,
+            ":block/page": { ":node/title": GUIDELINES_PAGE_TITLE, ":block/uid": "pg-1" },
+            ":block/children": [],
+          };
+        }
+        return { ":block/uid": "pg-1", ":node/title": GUIDELINES_PAGE_TITLE, ":block/children": [] };
+      },
+      page: { create: async () => {} },
+      block: {
+        create: async () => {},
+        update: async () => {},
+        delete: async ({ block }) => { deleted.push(block.uid); },
+      },
+    },
+  };
+
+  const removed = await removeGuidelinesIndex({ extensionAPI: api, roamAlphaAPI });
+  assert.equal(removed.status, "removed");
+  assert.equal(removed.deleted, true);
+  assert.deepEqual(deleted, ["indented-owned"]);
 });

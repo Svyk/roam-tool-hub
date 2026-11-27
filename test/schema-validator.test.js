@@ -88,3 +88,15 @@ test("unknown keywords pass silently and boolean/null schemas behave as draft-07
   assert.equal(validateAgainstSchema({ anything: 1 }, null).valid, true);
   assert.equal(validateAgainstSchema({ anything: 1 }, false).valid, false);
 });
+
+test("handles -0 enum equality, rejects non-plain objects like Date, and respects patternProperties", () => {
+  assert.equal(validateAgainstSchema(-0, { enum: [0] }).valid, true);
+  assert.equal(validateAgainstSchema(new Date(), { type: "object" }).valid, false);
+  assert.equal(
+    validateAgainstSchema(
+      { x_foo: 1 },
+      { type: "object", patternProperties: { "^x_": { type: "number" } }, additionalProperties: false },
+    ).valid,
+    true,
+  );
+});

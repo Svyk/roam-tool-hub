@@ -5,8 +5,8 @@ import {
   MAX_FIND_LIMIT,
   MAX_RESULT_CHARS,
 } from "./constants.js";
-import { defaultRegistryGetter, readRegistrySnapshot } from "./registry.js";
-import { validateAgainstSchema } from "./schema-validator.js";
+import { defaultRegistryGetter, readRegistrySnapshot, safeSlice } from "./registry.js";
+import { isPlainObject, validateAgainstSchema } from "./schema-validator.js";
 import { isExtensionEnabled, isExtensionWriteEnabled } from "./settings.js";
 
 export const HUB_TOOL_NAMES = Object.freeze([
@@ -45,13 +45,14 @@ export function finalizeToolResult(toolId, rawResult, maxChars = MAX_RESULT_CHAR
   if (serialized.length <= maxChars) {
     return { tool: toolId, result: normalized };
   }
+  const preview = safeSlice(serialized, maxChars);
   return {
     tool: toolId,
     truncated: true,
     originalChars: serialized.length,
     maxChars,
-    note: `Result truncated from ${serialized.length} to ${maxChars} characters.`,
-    resultPreview: serialized.slice(0, maxChars),
+    note: `Result truncated from ${serialized.length} to ${preview.length} characters.`,
+    resultPreview: preview,
   };
 }
 
@@ -146,7 +147,7 @@ export function createHubTools({
     }
 
     const toolArgs = args?.args === undefined ? {} : args.args;
-    if (toolArgs === null || typeof toolArgs !== "object" || Array.isArray(toolArgs)) {
+    if (!isPlainObject(toolArgs)) {
       return {
         tool: toolId,
         code: "validation-failed",
@@ -316,6 +317,21 @@ export function createHubTools({
           errors.push({ id, error: `Extension "${tool.extensionName}" (${tool.extensionKey}) is disabled.` });
           continue;
         }
+        let safeParameters = tool.parameters;
+        try {
+          const serialized = JSON.stringify(tool.parameters);
+          if (serialized && serialized.length > maxResultChars) {
+            safeParameters = {
+              _truncated: true,
+              note: `Parameter schema exceeded ${maxResultChars} chars and was omitted.`,
+            };
+          }
+        } catch {
+          safeParameters = {
+            _serializationError: true,
+            note: "Parameter schema was not JSON-serializable.",
+          };
+        }
         tools.push({
           id: tool.id,
           extension: tool.extensionKey,
@@ -324,7 +340,7 @@ export function createHubTools({
           description: tool.description,
           readOnly: tool.readOnly,
           writeEnabled: isExtensionWriteEnabled(extensionAPI, tool.extensionKey),
-          parameters: tool.parameters,
+          parameters: safeParameters,
         });
       }
       const response = { tools };
@@ -393,17 +409,7 @@ export function registerHubTools(extensionAPI, tools) {
     return () => {};
   }
   const registered = [];
-  for (const tool of tools) {
-    ai.addTool({
-      name: tool.name,
-      description: tool.description,
-      scope: tool.scope,
-      inputSchema: tool.inputSchema,
-      handler: tool.handler,
-    });
-    registered.push(tool.name);
-  }
-  return () => {
+  const removeRegistered = () => {
     for (const name of registered.splice(0).reverse()) {
       try {
         ai.removeTool?.({ name });
@@ -412,4 +418,20 @@ export function registerHubTools(extensionAPI, tools) {
       }
     }
   };
+  try {
+    for (const tool of tools) {
+      ai.addTool({
+        name: tool.name,
+        description: tool.description,
+        scope: tool.scope,
+        inputSchema: tool.inputSchema,
+        handler: tool.handler,
+      });
+      registered.push(tool.name);
+    }
+  } catch (error) {
+    removeRegistered();
+    throw error;
+  }
+  return removeRegistered;
 }

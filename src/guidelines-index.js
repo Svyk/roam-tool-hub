@@ -17,6 +17,9 @@ export const GUIDELINES_HEADING =
 const PAGE_PULL_PATTERN =
   "[:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order]}]}]";
 
+const BLOCK_PULL_PATTERN =
+  "[:block/uid :block/string {:block/page [:node/title :block/uid]} {:block/children [:block/uid :block/string :block/order]}]";
+
 function sortByOrder(children) {
   if (!Array.isArray(children)) return [];
   return [...children].sort((a, b) => (a?.[":block/order"] ?? 0) - (b?.[":block/order"] ?? 0));
@@ -36,17 +39,58 @@ function generateUid(roamAlphaAPI) {
   return `rth${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function pullGuidelinesPage(roamAlphaAPI) {
+/**
+ * Neutralizes live Roam syntax (macros {{}}, page refs [[]], block refs (()),
+ * #tags, and Attr:: attributes) so generated summary text never mounts widgets
+ * or creates unintended graph references on roam/agent guidelines.
+ */
+export function sanitizeRoamMarkup(text) {
+  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  return clean
+    .replace(/\{\{/g, "{ {")
+    .replace(/\}\}/g, "} }")
+    .replace(/\[\[/g, "[ [")
+    .replace(/\]\]/g, "] ]")
+    .replace(/\(\(/g, "( (")
+    .replace(/\)\)/g, ") )")
+    .replace(/::/g, ":")
+    .replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
+}
+
+function pullWithReceiver(roamAlphaAPI, pattern, entity) {
   const pull = roamAlphaAPI?.data?.pull || roamAlphaAPI?.pull;
   if (typeof pull !== "function") return null;
   try {
-    return pull.call(roamAlphaAPI.data || roamAlphaAPI, PAGE_PULL_PATTERN, [
-      ":node/title",
-      GUIDELINES_PAGE_TITLE,
-    ]);
+    return pull.call(roamAlphaAPI.data || roamAlphaAPI, pattern, entity);
   } catch {
     return null;
   }
+}
+
+function pullGuidelinesPage(roamAlphaAPI) {
+  return pullWithReceiver(roamAlphaAPI, PAGE_PULL_PATTERN, [
+    ":node/title",
+    GUIDELINES_PAGE_TITLE,
+  ]);
+}
+
+function findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid) {
+  if (!storedUid) return null;
+  const direct = pullWithReceiver(roamAlphaAPI, BLOCK_PULL_PATTERN, [":block/uid", storedUid]);
+  if (direct?.[":block/uid"] === storedUid) {
+    const pageRef = Array.isArray(direct[":block/page"]) ? direct[":block/page"][0] : direct[":block/page"];
+    const pageTitle = pageRef?.[":node/title"];
+    const pageUid = pageRef?.[":block/uid"];
+    if (
+      pageTitle === GUIDELINES_PAGE_TITLE
+      || (page?.[":block/uid"] && pageUid === page[":block/uid"])
+    ) {
+      return direct;
+    }
+  }
+  const topLevel = sortByOrder(page?.[":block/children"]);
+  return topLevel.find((child) => child?.[":block/uid"] === storedUid) || null;
 }
 
 async function withGuidelinesLock(roamAlphaAPI, fn) {
@@ -56,10 +100,7 @@ async function withGuidelinesLock(roamAlphaAPI, fn) {
   }
   const graphName = roamAlphaAPI?.graph?.name || "default";
   const lockName = `roam-tool-hub:guidelines:${graphName}`;
-  return await locks.request(lockName, { ifAvailable: true }, async (lock) => {
-    if (!lock) return { status: "skipped-locked", writes: 0 };
-    return await fn();
-  });
+  return await locks.request(lockName, async () => await fn());
 }
 
 export function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = () => false } = {}) {
@@ -76,7 +117,10 @@ export function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = ()
     const children = extensions.map((ext) => {
       const plural = ext.toolCount === 1 ? "tool" : "tools";
       const writeState = isWriteEnabled(ext.key) ? "writes on" : "writes off";
-      return `**${ext.name}** (\`${ext.key}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${ext.summary}`;
+      const safeName = sanitizeRoamMarkup(ext.name);
+      const safeKey = sanitizeRoamMarkup(ext.key);
+      const safeSummary = sanitizeRoamMarkup(ext.summary);
+      return `**${safeName}** (\`${safeKey}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${safeSummary}`;
     });
     return { heading: GUIDELINES_HEADING, children };
   }
@@ -84,7 +128,7 @@ export function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = ()
   const groups = new Map();
   let totalTools = 0;
   for (const ext of extensions) {
-    const groupName = ext.group || "Other";
+    const groupName = sanitizeRoamMarkup(ext.group || "Other") || "Other";
     if (!groups.has(groupName)) groups.set(groupName, { count: 0, tools: 0 });
     const bucket = groups.get(groupName);
     bucket.count += 1;
@@ -114,16 +158,25 @@ export async function syncGuidelinesIndex({
   roamAlphaAPI = defaultRoamApiGetter(),
   getRegistry = defaultRegistryGetter,
   forceEnabled,
+  allowShrink = true,
 } = {}) {
   const enabled = forceEnabled !== undefined ? Boolean(forceEnabled) : isGuidelinesIndexEnabled(extensionAPI);
   if (!enabled) {
     return { status: "disabled", writes: 0 };
+  }
+  if (extensionAPI?.settings?.canSet === false) {
+    return { status: "read-only-settings", writes: 0 };
   }
   if (!roamAlphaAPI?.data?.block || !roamAlphaAPI?.data?.page) {
     return { status: "no-roam-api", writes: 0 };
   }
 
   return await withGuidelinesLock(roamAlphaAPI, async () => {
+    // Re-check enabled inside the lock unless explicitly forced, so a queued OFF wins.
+    if (forceEnabled === undefined && !isGuidelinesIndexEnabled(extensionAPI)) {
+      return { status: "disabled", writes: 0 };
+    }
+
     const snapshot = readRegistrySnapshot(getRegistry);
     const enabledExts = snapshot.extensions.filter((ext) => isExtensionEnabled(extensionAPI, ext.key));
     const model = buildGuidelinesIndexModel({
@@ -136,28 +189,34 @@ export async function syncGuidelinesIndex({
     let writes = 0;
 
     if (!pageUid) {
-      pageUid = generateUid(roamAlphaAPI);
-      await roamAlphaAPI.data.page.create({
-        page: { title: GUIDELINES_PAGE_TITLE, uid: pageUid },
-      });
-      writes += 1;
+      const candidateUid = generateUid(roamAlphaAPI);
+      try {
+        await roamAlphaAPI.data.page.create({
+          page: { title: GUIDELINES_PAGE_TITLE, uid: candidateUid },
+        });
+        writes += 1;
+      } catch {
+        // Another tab may have created the page concurrently; re-pull below.
+      }
       page = pullGuidelinesPage(roamAlphaAPI);
-      pageUid = page?.[":block/uid"] || pageUid;
+      pageUid = page?.[":block/uid"] || candidateUid;
     }
 
     const storedUid = getGuidelinesBlockUid(extensionAPI);
-    const topLevelBlocks = sortByOrder(page?.[":block/children"]);
-    const existingBlock = storedUid
-      ? topLevelBlocks.find((child) => child?.[":block/uid"] === storedUid) || null
-      : null;
+    const existingBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
 
     if (!existingBlock) {
+      if (!allowShrink && enabledExts.length === 0) {
+        return { status: "deferred-empty-boot", writes: 0 };
+      }
       const parentUid = generateUid(roamAlphaAPI);
       await roamAlphaAPI.data.block.create({
         location: { "parent-uid": pageUid, order: "last" },
         block: { uid: parentUid, string: model.heading },
       });
       writes += 1;
+      // Persist immediately after creating parent so a mid-loop failure never orphans it.
+      await setGuidelinesBlockUid(extensionAPI, parentUid);
       for (let i = 0; i < model.children.length; i += 1) {
         await roamAlphaAPI.data.block.create({
           location: { "parent-uid": parentUid, order: i },
@@ -165,11 +224,16 @@ export async function syncGuidelinesIndex({
         });
         writes += 1;
       }
-      await setGuidelinesBlockUid(extensionAPI, parentUid);
       return { status: "created", uid: parentUid, writes };
     }
 
     const existingChildren = sortByOrder(existingBlock[":block/children"]);
+    // On boot (allowShrink: false), never shrink an already-populated index because
+    // other extensions may not have finished registering on window.RoamExtensionTools yet.
+    if (!allowShrink && (enabledExts.length === 0 || model.children.length < existingChildren.length)) {
+      return { status: "preserved-on-boot", uid: storedUid, writes: 0 };
+    }
+
     const headingMatches = existingBlock[":block/string"] === model.heading;
     const childrenMatch =
       existingChildren.length === model.children.length
@@ -219,6 +283,9 @@ export async function removeGuidelinesIndex({
   extensionAPI,
   roamAlphaAPI = defaultRoamApiGetter(),
 } = {}) {
+  if (extensionAPI?.settings?.canSet === false) {
+    return { status: "read-only-settings", deleted: false };
+  }
   if (!roamAlphaAPI?.data?.block) {
     return { status: "no-roam-api", deleted: false };
   }
@@ -229,8 +296,7 @@ export async function removeGuidelinesIndex({
     }
 
     const page = pullGuidelinesPage(roamAlphaAPI);
-    const topLevelBlocks = sortByOrder(page?.[":block/children"]);
-    const ownedBlock = topLevelBlocks.find((child) => child?.[":block/uid"] === storedUid) || null;
+    const ownedBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
 
     if (ownedBlock) {
       await roamAlphaAPI.data.block.delete({

@@ -4,11 +4,22 @@ function collapseWhitespace(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
 
+export function safeSlice(text, maxChars) {
+  if (typeof text !== "string" || maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  let end = maxChars;
+  const lastCode = text.charCodeAt(end - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
 export function truncateText(text, maxChars) {
   const clean = collapseWhitespace(text);
   if (clean.length <= maxChars) return clean;
-  if (maxChars <= 1) return clean.slice(0, maxChars);
-  return `${clean.slice(0, maxChars - 1)}…`;
+  if (maxChars <= 1) return safeSlice(clean, maxChars);
+  return `${safeSlice(clean, maxChars - 1)}…`;
 }
 
 function firstSentence(text) {
@@ -38,8 +49,7 @@ function deriveExtensionSummary(ext, tools) {
   if (snippets.length === 0) {
     return truncateText(`Tools: ${tools.slice(0, 4).map((t) => t.name).join(", ")}`, MAX_SUMMARY_CHARS);
   }
-  const joined = snippets.join(" ");
-  return truncateText(joined, MAX_SUMMARY_CHARS);
+  return truncateText(snippets.join(" "), MAX_SUMMARY_CHARS);
 }
 
 export function isToolReadOnly(rawTool) {
@@ -72,20 +82,20 @@ export function readRegistrySnapshot(getRegistry = defaultRegistryGetter) {
   const toolsById = new Map();
 
   for (const [extKey, ext] of Object.entries(rawRegistry)) {
-    if (!extKey || !ext || typeof ext !== "object" || !Array.isArray(ext.tools)) continue;
+    if (!extKey || extKey.includes("/") || !ext || typeof ext !== "object" || !Array.isArray(ext.tools)) continue;
 
-    const name = typeof ext.name === "string" && ext.name.trim() ? ext.name.trim() : extKey;
-    const version = typeof ext.version === "string" && ext.version.trim() ? ext.version.trim() : null;
-    const group = typeof ext.group === "string" && ext.group.trim() ? ext.group.trim() : null;
+    const name = collapseWhitespace(ext.name) || extKey;
+    const version = collapseWhitespace(ext.version) || null;
+    const group = collapseWhitespace(ext.group) || null;
 
     const seenNames = new Set();
     const tools = [];
     for (const rawTool of ext.tools) {
       if (!rawTool || typeof rawTool !== "object") continue;
-      if (typeof rawTool.name !== "string" || !rawTool.name.trim()) continue;
-      if (typeof rawTool.execute !== "function") continue;
-
+      if (typeof rawTool.name !== "string") continue;
       const toolName = rawTool.name.trim();
+      if (!toolName || toolName.includes("/")) continue;
+      if (typeof rawTool.execute !== "function") continue;
       if (seenNames.has(toolName)) continue;
       seenNames.add(toolName);
 
@@ -104,7 +114,7 @@ export function readRegistrySnapshot(getRegistry = defaultRegistryGetter) {
         shortDescription: truncateText(description, MAX_TOOL_DESCRIPTION_CHARS),
         readOnly: isToolReadOnly(rawTool),
         parameters,
-        execute: rawTool.execute,
+        execute: (args, context) => rawTool.execute(args, context),
       };
       tools.push(normalizedTool);
       toolsById.set(id, normalizedTool);

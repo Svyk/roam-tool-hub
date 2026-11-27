@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createHubTools, finalizeToolResult, HUB_TOOL_NAMES } from "../src/hub-tools.js";
+import { createHubTools, finalizeToolResult, HUB_TOOL_NAMES, registerHubTools } from "../src/hub-tools.js";
 import { extensionEnabledSettingId, extensionWriteSettingId } from "../src/settings.js";
 
 function makeFakeExtensionAPI() {
@@ -294,4 +294,57 @@ test("re-reads window.RoamExtensionTools live on each call without caching", () 
   };
   assert.equal(map.list_extensions.handler().totalExtensions, 1);
   assert.equal(map.find_tools.handler({ query: "ping" }).tools[0].id, "late-ext/ping");
+});
+
+test("preserves tool this-binding, rejects slash tool names, avoids surrogate splits, and rolls back partial addTool failure", async () => {
+  const api = makeFakeExtensionAPI();
+  const registry = {
+    "ctx-ext": {
+      name: "Ctx Ext",
+      tools: [
+        {
+          name: "self_check",
+          readOnly: true,
+          tag: "bound-ok",
+          description: "Checks this binding.",
+          execute() {
+            return { tag: this.tag };
+          },
+        },
+        {
+          name: "bad/slash",
+          readOnly: true,
+          description: "Should be skipped.",
+          execute: () => ({}),
+        },
+      ],
+    },
+  };
+  const map = toolsByName(createHubTools({ extensionAPI: api, getRegistry: () => registry }));
+  assert.equal(map.find_tools.handler({}).totalMatched, 1);
+  const res = await map.run_read_tool.handler({ tool: "ctx-ext/self_check" });
+  assert.deepEqual(res, { tool: "ctx-ext/self_check", result: { tag: "bound-ok" } });
+
+  // Surrogate pair at truncation boundary is not split into a lone surrogate
+  const emojiPayload = "😀".repeat(20);
+  const cut = finalizeToolResult("ext/emoji", emojiPayload, 10);
+  assert.equal(cut.truncated, true);
+  const lastCode = cut.resultPreview.charCodeAt(cut.resultPreview.length - 1);
+  assert.equal(lastCode >= 0xd800 && lastCode <= 0xdbff, false);
+
+  // Partial addTool failure cleans up earlier registered tools
+  const removed = [];
+  let count = 0;
+  const failingApi = {
+    ai: {
+      addTool: ({ name }) => {
+        count += 1;
+        if (count === 3) throw new Error("boom");
+        return name;
+      },
+      removeTool: ({ name }) => removed.push(name),
+    },
+  };
+  assert.throws(() => registerHubTools(failingApi, Object.values(map)), /boom/);
+  assert.equal(removed.length, 2);
 });

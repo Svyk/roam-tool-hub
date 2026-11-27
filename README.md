@@ -18,7 +18,7 @@ Agents discover tools in order: `list_extensions` or `find_tools` → `describe_
 
 ## Safety and attribution
 
-- **Read-only isolation**: `run_read_tool` is registered with `scope: "read"` and refuses any tool without `readOnly: true` (or with `isMutating: true`). `run_tool` is registered with `scope: "edit"`, so Roam blocks it on read-only AI connections before the handler runs.
+- **Read-only isolation**: `run_read_tool` is registered with `scope: "read"` and refuses any tool without `readOnly: true` (or with `isMutating: true`). `run_tool` is registered with `scope: "edit"`, so Roam blocks it on read-only AI connections before the handler runs. Note: `run_read_tool` relies on each registry tool honestly marking `readOnly: true` (Roam's read-only token scope blocks synchronous writes, whereas a mislabeled tool writing after an `await` runs with the logged-in session).
 - **Per-extension defaults**: Newly discovered extensions default to **expose tools: ON** (read-only tools enabled) and **allow writing tools: OFF**. Turning an extension off hides it from discovery and blocks execution.
 - **Argument validation**: Before calling `tool.execute`, arguments are validated against the tool's `parameters` using a built-in draft-07 subset (`type`, `required`, `properties`, `items`, `enum`, `minimum`, `maximum`, `minItems`, `maxItems`, `minLength`, `maxLength`, `additionalProperties`). Unknown keywords pass silently.
 - **Result size cap**: Thrown errors and rejected promises are caught and returned as `{ tool, code, error }`. Serialized results above 40,000 characters are truncated with `truncated: true`, `originalChars`, `maxChars`, and a note.

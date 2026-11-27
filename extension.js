@@ -22,11 +22,21 @@ var SETTING_IDS = Object.freeze({
 function collapseWhitespace(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
+function safeSlice(text, maxChars) {
+  if (typeof text !== "string" || maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  let end = maxChars;
+  const lastCode = text.charCodeAt(end - 1);
+  if (lastCode >= 55296 && lastCode <= 56319) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
 function truncateText(text, maxChars) {
   const clean = collapseWhitespace(text);
   if (clean.length <= maxChars) return clean;
-  if (maxChars <= 1) return clean.slice(0, maxChars);
-  return `${clean.slice(0, maxChars - 1)}…`;
+  if (maxChars <= 1) return safeSlice(clean, maxChars);
+  return `${safeSlice(clean, maxChars - 1)}…`;
 }
 function firstSentence(text) {
   const clean = collapseWhitespace(text);
@@ -54,8 +64,7 @@ function deriveExtensionSummary(ext, tools) {
   if (snippets.length === 0) {
     return truncateText(`Tools: ${tools.slice(0, 4).map((t) => t.name).join(", ")}`, MAX_SUMMARY_CHARS);
   }
-  const joined = snippets.join(" ");
-  return truncateText(joined, MAX_SUMMARY_CHARS);
+  return truncateText(snippets.join(" "), MAX_SUMMARY_CHARS);
 }
 function isToolReadOnly(rawTool) {
   return rawTool?.readOnly === true && rawTool?.isMutating !== true;
@@ -83,17 +92,18 @@ function readRegistrySnapshot(getRegistry = defaultRegistryGetter) {
   const byKey = /* @__PURE__ */ new Map();
   const toolsById = /* @__PURE__ */ new Map();
   for (const [extKey, ext] of Object.entries(rawRegistry)) {
-    if (!extKey || !ext || typeof ext !== "object" || !Array.isArray(ext.tools)) continue;
-    const name = typeof ext.name === "string" && ext.name.trim() ? ext.name.trim() : extKey;
-    const version = typeof ext.version === "string" && ext.version.trim() ? ext.version.trim() : null;
-    const group = typeof ext.group === "string" && ext.group.trim() ? ext.group.trim() : null;
+    if (!extKey || extKey.includes("/") || !ext || typeof ext !== "object" || !Array.isArray(ext.tools)) continue;
+    const name = collapseWhitespace(ext.name) || extKey;
+    const version = collapseWhitespace(ext.version) || null;
+    const group = collapseWhitespace(ext.group) || null;
     const seenNames = /* @__PURE__ */ new Set();
     const tools = [];
     for (const rawTool of ext.tools) {
       if (!rawTool || typeof rawTool !== "object") continue;
-      if (typeof rawTool.name !== "string" || !rawTool.name.trim()) continue;
-      if (typeof rawTool.execute !== "function") continue;
+      if (typeof rawTool.name !== "string") continue;
       const toolName = rawTool.name.trim();
+      if (!toolName || toolName.includes("/")) continue;
+      if (typeof rawTool.execute !== "function") continue;
       if (seenNames.has(toolName)) continue;
       seenNames.add(toolName);
       const id = `${extKey}/${toolName}`;
@@ -108,7 +118,7 @@ function readRegistrySnapshot(getRegistry = defaultRegistryGetter) {
         shortDescription: truncateText(description, MAX_TOOL_DESCRIPTION_CHARS),
         readOnly: isToolReadOnly(rawTool),
         parameters,
-        execute: rawTool.execute
+        execute: (args, context) => rawTool.execute(args, context)
       };
       tools.push(normalizedTool);
       toolsById.set(id, normalizedTool);
@@ -246,6 +256,7 @@ function createSettingsPanel({
 // src/guidelines-index.js
 var GUIDELINES_HEADING = "**Tool Hub** (generated index — managed by Tool Hub; edit settings instead of this block)";
 var PAGE_PULL_PATTERN = "[:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order]}]}]";
+var BLOCK_PULL_PATTERN = "[:block/uid :block/string {:block/page [:node/title :block/uid]} {:block/children [:block/uid :block/string :block/order]}]";
 function sortByOrder(children) {
   if (!Array.isArray(children)) return [];
   return [...children].sort((a, b) => (a?.[":block/order"] ?? 0) - (b?.[":block/order"] ?? 0));
@@ -262,17 +273,39 @@ function generateUid(roamAlphaAPI) {
   }
   return `rth${Math.random().toString(36).slice(2, 10)}`;
 }
-function pullGuidelinesPage(roamAlphaAPI) {
+function sanitizeRoamMarkup(text) {
+  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  return clean.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }").replace(/\[\[/g, "[ [").replace(/\]\]/g, "] ]").replace(/\(\(/g, "( (").replace(/\)\)/g, ") )").replace(/::/g, ":").replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
+}
+function pullWithReceiver(roamAlphaAPI, pattern, entity) {
   const pull = roamAlphaAPI?.data?.pull || roamAlphaAPI?.pull;
   if (typeof pull !== "function") return null;
   try {
-    return pull.call(roamAlphaAPI.data || roamAlphaAPI, PAGE_PULL_PATTERN, [
-      ":node/title",
-      GUIDELINES_PAGE_TITLE
-    ]);
+    return pull.call(roamAlphaAPI.data || roamAlphaAPI, pattern, entity);
   } catch {
     return null;
   }
+}
+function pullGuidelinesPage(roamAlphaAPI) {
+  return pullWithReceiver(roamAlphaAPI, PAGE_PULL_PATTERN, [
+    ":node/title",
+    GUIDELINES_PAGE_TITLE
+  ]);
+}
+function findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid) {
+  if (!storedUid) return null;
+  const direct = pullWithReceiver(roamAlphaAPI, BLOCK_PULL_PATTERN, [":block/uid", storedUid]);
+  if (direct?.[":block/uid"] === storedUid) {
+    const pageRef = Array.isArray(direct[":block/page"]) ? direct[":block/page"][0] : direct[":block/page"];
+    const pageTitle = pageRef?.[":node/title"];
+    const pageUid = pageRef?.[":block/uid"];
+    if (pageTitle === GUIDELINES_PAGE_TITLE || page?.[":block/uid"] && pageUid === page[":block/uid"]) {
+      return direct;
+    }
+  }
+  const topLevel = sortByOrder(page?.[":block/children"]);
+  return topLevel.find((child) => child?.[":block/uid"] === storedUid) || null;
 }
 async function withGuidelinesLock(roamAlphaAPI, fn) {
   const locks = globalThis.navigator?.locks;
@@ -281,10 +314,7 @@ async function withGuidelinesLock(roamAlphaAPI, fn) {
   }
   const graphName = roamAlphaAPI?.graph?.name || "default";
   const lockName = `roam-tool-hub:guidelines:${graphName}`;
-  return await locks.request(lockName, { ifAvailable: true }, async (lock) => {
-    if (!lock) return { status: "skipped-locked", writes: 0 };
-    return await fn();
-  });
+  return await locks.request(lockName, async () => await fn());
 }
 function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = () => false } = {}) {
   if (extensions.length === 0) {
@@ -299,14 +329,17 @@ function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = () => fal
     const children2 = extensions.map((ext) => {
       const plural = ext.toolCount === 1 ? "tool" : "tools";
       const writeState = isWriteEnabled(ext.key) ? "writes on" : "writes off";
-      return `**${ext.name}** (\`${ext.key}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${ext.summary}`;
+      const safeName = sanitizeRoamMarkup(ext.name);
+      const safeKey = sanitizeRoamMarkup(ext.key);
+      const safeSummary = sanitizeRoamMarkup(ext.summary);
+      return `**${safeName}** (\`${safeKey}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${safeSummary}`;
     });
     return { heading: GUIDELINES_HEADING, children: children2 };
   }
   const groups = /* @__PURE__ */ new Map();
   let totalTools = 0;
   for (const ext of extensions) {
-    const groupName = ext.group || "Other";
+    const groupName = sanitizeRoamMarkup(ext.group || "Other") || "Other";
     if (!groups.has(groupName)) groups.set(groupName, { count: 0, tools: 0 });
     const bucket = groups.get(groupName);
     bucket.count += 1;
@@ -332,16 +365,23 @@ async function syncGuidelinesIndex({
   extensionAPI,
   roamAlphaAPI = defaultRoamApiGetter(),
   getRegistry = defaultRegistryGetter,
-  forceEnabled
+  forceEnabled,
+  allowShrink = true
 } = {}) {
   const enabled = forceEnabled !== void 0 ? Boolean(forceEnabled) : isGuidelinesIndexEnabled(extensionAPI);
   if (!enabled) {
     return { status: "disabled", writes: 0 };
   }
+  if (extensionAPI?.settings?.canSet === false) {
+    return { status: "read-only-settings", writes: 0 };
+  }
   if (!roamAlphaAPI?.data?.block || !roamAlphaAPI?.data?.page) {
     return { status: "no-roam-api", writes: 0 };
   }
   return await withGuidelinesLock(roamAlphaAPI, async () => {
+    if (forceEnabled === void 0 && !isGuidelinesIndexEnabled(extensionAPI)) {
+      return { status: "disabled", writes: 0 };
+    }
     const snapshot = readRegistrySnapshot(getRegistry);
     const enabledExts = snapshot.extensions.filter((ext) => isExtensionEnabled(extensionAPI, ext.key));
     const model = buildGuidelinesIndexModel({
@@ -352,24 +392,30 @@ async function syncGuidelinesIndex({
     let pageUid = page?.[":block/uid"] || null;
     let writes = 0;
     if (!pageUid) {
-      pageUid = generateUid(roamAlphaAPI);
-      await roamAlphaAPI.data.page.create({
-        page: { title: GUIDELINES_PAGE_TITLE, uid: pageUid }
-      });
-      writes += 1;
+      const candidateUid = generateUid(roamAlphaAPI);
+      try {
+        await roamAlphaAPI.data.page.create({
+          page: { title: GUIDELINES_PAGE_TITLE, uid: candidateUid }
+        });
+        writes += 1;
+      } catch {
+      }
       page = pullGuidelinesPage(roamAlphaAPI);
-      pageUid = page?.[":block/uid"] || pageUid;
+      pageUid = page?.[":block/uid"] || candidateUid;
     }
     const storedUid = getGuidelinesBlockUid(extensionAPI);
-    const topLevelBlocks = sortByOrder(page?.[":block/children"]);
-    const existingBlock = storedUid ? topLevelBlocks.find((child) => child?.[":block/uid"] === storedUid) || null : null;
+    const existingBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
     if (!existingBlock) {
+      if (!allowShrink && enabledExts.length === 0) {
+        return { status: "deferred-empty-boot", writes: 0 };
+      }
       const parentUid = generateUid(roamAlphaAPI);
       await roamAlphaAPI.data.block.create({
         location: { "parent-uid": pageUid, order: "last" },
         block: { uid: parentUid, string: model.heading }
       });
       writes += 1;
+      await setGuidelinesBlockUid(extensionAPI, parentUid);
       for (let i = 0; i < model.children.length; i += 1) {
         await roamAlphaAPI.data.block.create({
           location: { "parent-uid": parentUid, order: i },
@@ -377,10 +423,12 @@ async function syncGuidelinesIndex({
         });
         writes += 1;
       }
-      await setGuidelinesBlockUid(extensionAPI, parentUid);
       return { status: "created", uid: parentUid, writes };
     }
     const existingChildren = sortByOrder(existingBlock[":block/children"]);
+    if (!allowShrink && (enabledExts.length === 0 || model.children.length < existingChildren.length)) {
+      return { status: "preserved-on-boot", uid: storedUid, writes: 0 };
+    }
     const headingMatches = existingBlock[":block/string"] === model.heading;
     const childrenMatch = existingChildren.length === model.children.length && existingChildren.every((child, index) => child?.[":block/string"] === model.children[index]);
     if (headingMatches && childrenMatch) {
@@ -421,6 +469,9 @@ async function removeGuidelinesIndex({
   extensionAPI,
   roamAlphaAPI = defaultRoamApiGetter()
 } = {}) {
+  if (extensionAPI?.settings?.canSet === false) {
+    return { status: "read-only-settings", deleted: false };
+  }
   if (!roamAlphaAPI?.data?.block) {
     return { status: "no-roam-api", deleted: false };
   }
@@ -430,8 +481,7 @@ async function removeGuidelinesIndex({
       return { status: "not-found", deleted: false };
     }
     const page = pullGuidelinesPage(roamAlphaAPI);
-    const topLevelBlocks = sortByOrder(page?.[":block/children"]);
-    const ownedBlock = topLevelBlocks.find((child) => child?.[":block/uid"] === storedUid) || null;
+    const ownedBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
     if (ownedBlock) {
       await roamAlphaAPI.data.block.delete({
         block: { uid: storedUid }
@@ -448,10 +498,13 @@ async function removeGuidelinesIndex({
 
 // src/schema-validator.js
 function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 function deepEqual(a, b) {
-  if (Object.is(a, b)) return true;
+  if (a === b) return true;
+  if (Number.isNaN(a) && Number.isNaN(b)) return true;
   if (a === null || b === null || typeof a !== typeof b) return false;
   if (typeof a !== "object") return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
@@ -495,6 +548,9 @@ function describeType(value) {
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";
   if (typeof value === "number" && Number.isNaN(value)) return "NaN";
+  if (typeof value === "object" && !isPlainObject(value)) {
+    return value.constructor?.name || "object";
+  }
   return typeof value;
 }
 function validateNode(value, schema, path, errors) {
@@ -566,10 +622,12 @@ function validateNode(value, schema, path, errors) {
       }
     }
     const properties = isPlainObject(schema.properties) ? schema.properties : null;
+    const hasPatternProps = isPlainObject(schema.patternProperties) && Object.keys(schema.patternProperties).length > 0;
     for (const [key, propValue] of Object.entries(value)) {
       const childPath = path === "$" ? `$.${key}` : `${path}.${key}`;
       if (properties && Object.prototype.hasOwnProperty.call(properties, key)) {
         validateNode(propValue, properties[key], childPath, errors);
+      } else if (hasPatternProps) {
       } else if (schema.additionalProperties === false) {
         errors.push(`${childPath}: additional property is not allowed`);
       } else if (isPlainObject(schema.additionalProperties)) {
@@ -619,13 +677,14 @@ function finalizeToolResult(toolId, rawResult, maxChars = MAX_RESULT_CHARS) {
   if (serialized.length <= maxChars) {
     return { tool: toolId, result: normalized };
   }
+  const preview = safeSlice(serialized, maxChars);
   return {
     tool: toolId,
     truncated: true,
     originalChars: serialized.length,
     maxChars,
-    note: `Result truncated from ${serialized.length} to ${maxChars} characters.`,
-    resultPreview: serialized.slice(0, maxChars)
+    note: `Result truncated from ${serialized.length} to ${preview.length} characters.`,
+    resultPreview: preview
   };
 }
 async function invokeWithAttribution(tool, args, context) {
@@ -707,7 +766,7 @@ function createHubTools({
       };
     }
     const toolArgs = args?.args === void 0 ? {} : args.args;
-    if (toolArgs === null || typeof toolArgs !== "object" || Array.isArray(toolArgs)) {
+    if (!isPlainObject(toolArgs)) {
       return {
         tool: toolId,
         code: "validation-failed",
@@ -865,6 +924,21 @@ function createHubTools({
           errors.push({ id, error: `Extension "${tool.extensionName}" (${tool.extensionKey}) is disabled.` });
           continue;
         }
+        let safeParameters = tool.parameters;
+        try {
+          const serialized = JSON.stringify(tool.parameters);
+          if (serialized && serialized.length > maxResultChars) {
+            safeParameters = {
+              _truncated: true,
+              note: `Parameter schema exceeded ${maxResultChars} chars and was omitted.`
+            };
+          }
+        } catch {
+          safeParameters = {
+            _serializationError: true,
+            note: "Parameter schema was not JSON-serializable."
+          };
+        }
         tools.push({
           id: tool.id,
           extension: tool.extensionKey,
@@ -873,7 +947,7 @@ function createHubTools({
           description: tool.description,
           readOnly: tool.readOnly,
           writeEnabled: isExtensionWriteEnabled(extensionAPI, tool.extensionKey),
-          parameters: tool.parameters
+          parameters: safeParameters
         });
       }
       const response = { tools };
@@ -937,17 +1011,7 @@ function registerHubTools(extensionAPI, tools) {
     };
   }
   const registered = [];
-  for (const tool of tools) {
-    ai.addTool({
-      name: tool.name,
-      description: tool.description,
-      scope: tool.scope,
-      inputSchema: tool.inputSchema,
-      handler: tool.handler
-    });
-    registered.push(tool.name);
-  }
-  return () => {
+  const removeRegistered = () => {
     for (const name of registered.splice(0).reverse()) {
       try {
         ai.removeTool?.({ name });
@@ -955,6 +1019,22 @@ function registerHubTools(extensionAPI, tools) {
       }
     }
   };
+  try {
+    for (const tool of tools) {
+      ai.addTool({
+        name: tool.name,
+        description: tool.description,
+        scope: tool.scope,
+        inputSchema: tool.inputSchema,
+        handler: tool.handler
+      });
+      registered.push(tool.name);
+    }
+  } catch (error) {
+    removeRegistered();
+    throw error;
+  }
+  return removeRegistered;
 }
 
 // src/lifecycle.js
@@ -1044,8 +1124,23 @@ function createLifecycle() {
 
 // src/extension.js
 var activeLifecycle = null;
+function resolveVersion(extension) {
+  const raw = typeof extension?.version === "string" ? extension.version.trim() : "";
+  if (raw && raw.toUpperCase() !== "DEV") return raw;
+  return HUB_VERSION;
+}
 function snapshotSignature(snapshot) {
-  return snapshot.extensions.map((ext) => `${ext.key}:${ext.name}:${ext.toolCount}:${ext.readCount}:${ext.writeCount}`).join("|");
+  return snapshot.extensions.map((ext) => [
+    ext.key,
+    ext.name,
+    ext.version || "",
+    ext.group || "",
+    ext.summary,
+    ext.toolCount,
+    ext.readCount,
+    ext.writeCount,
+    ext.tools.map((t) => `${t.name}:${t.readOnly ? "r" : "w"}`).join(",")
+  ].join(":")).join("|");
 }
 function setRuntimeVersion(version, lifecycle) {
   if (typeof globalThis.window === "undefined") return;
@@ -1061,79 +1156,104 @@ async function onload({ extensionAPI, extension } = {}) {
   if (activeLifecycle) await activeLifecycle.dispose();
   const lifecycle = createLifecycle();
   activeLifecycle = lifecycle;
-  const version = extension?.version || HUB_VERSION;
+  const version = resolveVersion(extension);
   try {
     let lastSignature = null;
-    let refreshing = false;
-    const syncGuidelinesIfEnabled = async (forceEnabled) => {
-      if (lifecycle.disposed) return;
+    let panelRunning = false;
+    let panelDirty = false;
+    let guidelinesRunning = false;
+    let guidelinesDirty = false;
+    let guidelinesAllowShrink = false;
+    const drainGuidelinesQueue = async () => {
+      if (guidelinesRunning || lifecycle.disposed) return;
+      guidelinesRunning = true;
       try {
-        await syncGuidelinesIndex({
-          extensionAPI,
-          getRegistry: defaultRegistryGetter,
-          forceEnabled
-        });
-      } catch (error) {
-        console.warn(`${LOG_PREFIX} Guidelines index sync failed`, error);
-      }
-    };
-    const handleToggleGuidelines = async (checked) => {
-      if (lifecycle.disposed) return;
-      if (extensionAPI.settings?.canSet !== false) {
-        await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, checked);
-      }
-      if (checked) {
-        await syncGuidelinesIfEnabled(true);
-      } else {
-        try {
-          await removeGuidelinesIndex({ extensionAPI });
-        } catch (error) {
-          console.warn(`${LOG_PREFIX} Guidelines index removal failed`, error);
-        }
-      }
-    };
-    const handleToggleExtension = async (extKey, field, checked) => {
-      if (lifecycle.disposed) return;
-      const settingId = field === "write" ? extensionWriteSettingId(extKey) : extensionEnabledSettingId(extKey);
-      if (extensionAPI.settings?.canSet !== false) {
-        await extensionAPI.settings.set(settingId, checked);
-      }
-      if (isGuidelinesIndexEnabled(extensionAPI)) {
-        await syncGuidelinesIfEnabled(true);
-      }
-    };
-    const refreshSettingsPanel = async (snapshot = readRegistrySnapshot(defaultRegistryGetter), { syncGuidelines = false } = {}) => {
-      if (lifecycle.disposed || refreshing) return;
-      refreshing = true;
-      try {
-        await seedExtensionDefaults(extensionAPI, snapshot.extensions);
-        if (lifecycle.disposed) return;
-        lastSignature = snapshotSignature(snapshot);
-        await lifecycle.settingsPanel(
-          extensionAPI,
-          createSettingsPanel({
-            extensions: snapshot.extensions,
-            onRefresh: () => refreshSettingsPanel(void 0, { syncGuidelines: true }),
-            onToggleExtension: handleToggleExtension,
-            onToggleGuidelines: handleToggleGuidelines
-          })
-        );
-        if (syncGuidelines && isGuidelinesIndexEnabled(extensionAPI)) {
-          await syncGuidelinesIfEnabled(true);
+        while (guidelinesDirty && !lifecycle.disposed) {
+          const allowShrink = guidelinesAllowShrink;
+          guidelinesDirty = false;
+          guidelinesAllowShrink = false;
+          if (extensionAPI.settings?.canSet === false) continue;
+          try {
+            if (isGuidelinesIndexEnabled(extensionAPI)) {
+              await syncGuidelinesIndex({
+                extensionAPI,
+                getRegistry: defaultRegistryGetter,
+                allowShrink
+              });
+            } else {
+              await removeGuidelinesIndex({ extensionAPI });
+            }
+          } catch (error) {
+            console.warn(`${LOG_PREFIX} Guidelines index reconciliation failed`, error);
+          }
         }
       } finally {
-        refreshing = false;
+        guidelinesRunning = false;
+      }
+    };
+    const scheduleGuidelinesReconcile = ({ allowShrink = true } = {}) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return Promise.resolve();
+      guidelinesDirty = true;
+      if (allowShrink) guidelinesAllowShrink = true;
+      return drainGuidelinesQueue();
+    };
+    const handleToggleGuidelines = async (checked) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
+      await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, checked);
+      await scheduleGuidelinesReconcile({ allowShrink: true });
+    };
+    const handleToggleExtension = async (extKey, field, checked) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
+      const settingId = field === "write" ? extensionWriteSettingId(extKey) : extensionEnabledSettingId(extKey);
+      await extensionAPI.settings.set(settingId, checked);
+      if (isGuidelinesIndexEnabled(extensionAPI)) {
+        await scheduleGuidelinesReconcile({ allowShrink: true });
+      }
+    };
+    const refreshSettingsPanel = async ({ syncGuidelines = false, allowShrink = true } = {}) => {
+      if (lifecycle.disposed) return;
+      if (panelRunning) {
+        panelDirty = true;
+        if (syncGuidelines) void scheduleGuidelinesReconcile({ allowShrink });
+        return;
+      }
+      panelRunning = true;
+      try {
+        do {
+          panelDirty = false;
+          const snapshot = readRegistrySnapshot(defaultRegistryGetter);
+          await seedExtensionDefaults(extensionAPI, snapshot.extensions);
+          if (lifecycle.disposed) return;
+          lastSignature = snapshotSignature(snapshot);
+          await lifecycle.settingsPanel(
+            extensionAPI,
+            createSettingsPanel({
+              extensions: snapshot.extensions,
+              onRefresh: () => refreshSettingsPanel({ syncGuidelines: true, allowShrink: true }),
+              onToggleExtension: handleToggleExtension,
+              onToggleGuidelines: handleToggleGuidelines
+            })
+          );
+        } while (panelDirty && !lifecycle.disposed);
+      } finally {
+        panelRunning = false;
+      }
+      if (syncGuidelines && !lifecycle.disposed && isGuidelinesIndexEnabled(extensionAPI)) {
+        await scheduleGuidelinesReconcile({ allowShrink });
       }
     };
     const onSnapshot = (snapshot) => {
+      if (lifecycle.disposed) return;
       const nextSignature = snapshotSignature(snapshot);
       if (nextSignature !== lastSignature) {
-        void refreshSettingsPanel(snapshot, { syncGuidelines: true }).catch((error) => {
+        void refreshSettingsPanel({ syncGuidelines: false }).catch((error) => {
           console.warn(`${LOG_PREFIX} Settings panel refresh failed`, error);
         });
       }
     };
-    await refreshSettingsPanel(void 0, { syncGuidelines: true });
+    await refreshSettingsPanel({ syncGuidelines: true, allowShrink: false });
+    if (lifecycle.disposed) return async () => {
+    };
     const tools = createHubTools({
       extensionAPI,
       getRegistry: defaultRegistryGetter,
@@ -1145,9 +1265,11 @@ async function onload({ extensionAPI, extension } = {}) {
       await lifecycle.command(extensionAPI.ui.commandPalette, {
         label: "Tool Hub: Refresh registry & settings",
         callback: () => {
-          void refreshSettingsPanel(void 0, { syncGuidelines: true });
+          void refreshSettingsPanel({ syncGuidelines: true, allowShrink: true });
         }
       });
+      if (lifecycle.disposed) return async () => {
+      };
     }
     setRuntimeVersion(version, lifecycle);
     console.info(`${LOG_PREFIX} Loaded v${version}`);

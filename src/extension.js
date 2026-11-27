@@ -13,9 +13,25 @@ import {
 
 let activeLifecycle = null;
 
+function resolveVersion(extension) {
+  const raw = typeof extension?.version === "string" ? extension.version.trim() : "";
+  if (raw && raw.toUpperCase() !== "DEV") return raw;
+  return HUB_VERSION;
+}
+
 function snapshotSignature(snapshot) {
   return snapshot.extensions
-    .map((ext) => `${ext.key}:${ext.name}:${ext.toolCount}:${ext.readCount}:${ext.writeCount}`)
+    .map((ext) => [
+      ext.key,
+      ext.name,
+      ext.version || "",
+      ext.group || "",
+      ext.summary,
+      ext.toolCount,
+      ext.readCount,
+      ext.writeCount,
+      ext.tools.map((t) => `${t.name}:${t.readOnly ? "r" : "w"}`).join(","),
+    ].join(":"))
     .join("|");
 }
 
@@ -35,91 +51,114 @@ export async function onload({ extensionAPI, extension } = {}) {
 
   const lifecycle = createLifecycle();
   activeLifecycle = lifecycle;
-  const version = extension?.version || HUB_VERSION;
+  const version = resolveVersion(extension);
 
   try {
     let lastSignature = null;
-    let refreshing = false;
+    let panelRunning = false;
+    let panelDirty = false;
+    let guidelinesRunning = false;
+    let guidelinesDirty = false;
+    let guidelinesAllowShrink = false;
 
-    const syncGuidelinesIfEnabled = async (forceEnabled) => {
-      if (lifecycle.disposed) return;
+    const drainGuidelinesQueue = async () => {
+      if (guidelinesRunning || lifecycle.disposed) return;
+      guidelinesRunning = true;
       try {
-        await syncGuidelinesIndex({
-          extensionAPI,
-          getRegistry: defaultRegistryGetter,
-          forceEnabled,
-        });
-      } catch (error) {
-        console.warn(`${LOG_PREFIX} Guidelines index sync failed`, error);
+        while (guidelinesDirty && !lifecycle.disposed) {
+          const allowShrink = guidelinesAllowShrink;
+          guidelinesDirty = false;
+          guidelinesAllowShrink = false;
+          if (extensionAPI.settings?.canSet === false) continue;
+          try {
+            if (isGuidelinesIndexEnabled(extensionAPI)) {
+              await syncGuidelinesIndex({
+                extensionAPI,
+                getRegistry: defaultRegistryGetter,
+                allowShrink,
+              });
+            } else {
+              await removeGuidelinesIndex({ extensionAPI });
+            }
+          } catch (error) {
+            console.warn(`${LOG_PREFIX} Guidelines index reconciliation failed`, error);
+          }
+        }
+      } finally {
+        guidelinesRunning = false;
       }
+    };
+
+    const scheduleGuidelinesReconcile = ({ allowShrink = true } = {}) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return Promise.resolve();
+      guidelinesDirty = true;
+      if (allowShrink) guidelinesAllowShrink = true;
+      return drainGuidelinesQueue();
     };
 
     const handleToggleGuidelines = async (checked) => {
-      if (lifecycle.disposed) return;
-      if (extensionAPI.settings?.canSet !== false) {
-        await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, checked);
-      }
-      if (checked) {
-        await syncGuidelinesIfEnabled(true);
-      } else {
-        try {
-          await removeGuidelinesIndex({ extensionAPI });
-        } catch (error) {
-          console.warn(`${LOG_PREFIX} Guidelines index removal failed`, error);
-        }
-      }
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
+      await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, checked);
+      await scheduleGuidelinesReconcile({ allowShrink: true });
     };
 
     const handleToggleExtension = async (extKey, field, checked) => {
-      if (lifecycle.disposed) return;
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
       const settingId = field === "write"
         ? extensionWriteSettingId(extKey)
         : extensionEnabledSettingId(extKey);
-      if (extensionAPI.settings?.canSet !== false) {
-        await extensionAPI.settings.set(settingId, checked);
-      }
+      await extensionAPI.settings.set(settingId, checked);
       if (isGuidelinesIndexEnabled(extensionAPI)) {
-        await syncGuidelinesIfEnabled(true);
+        await scheduleGuidelinesReconcile({ allowShrink: true });
       }
     };
 
-    const refreshSettingsPanel = async (
-      snapshot = readRegistrySnapshot(defaultRegistryGetter),
-      { syncGuidelines = false } = {},
-    ) => {
-      if (lifecycle.disposed || refreshing) return;
-      refreshing = true;
+    const refreshSettingsPanel = async ({ syncGuidelines = false, allowShrink = true } = {}) => {
+      if (lifecycle.disposed) return;
+      if (panelRunning) {
+        panelDirty = true;
+        if (syncGuidelines) void scheduleGuidelinesReconcile({ allowShrink });
+        return;
+      }
+      panelRunning = true;
       try {
-        await seedExtensionDefaults(extensionAPI, snapshot.extensions);
-        if (lifecycle.disposed) return;
-        lastSignature = snapshotSignature(snapshot);
-        await lifecycle.settingsPanel(
-          extensionAPI,
-          createSettingsPanel({
-            extensions: snapshot.extensions,
-            onRefresh: () => refreshSettingsPanel(undefined, { syncGuidelines: true }),
-            onToggleExtension: handleToggleExtension,
-            onToggleGuidelines: handleToggleGuidelines,
-          }),
-        );
-        if (syncGuidelines && isGuidelinesIndexEnabled(extensionAPI)) {
-          await syncGuidelinesIfEnabled(true);
-        }
+        do {
+          panelDirty = false;
+          const snapshot = readRegistrySnapshot(defaultRegistryGetter);
+          await seedExtensionDefaults(extensionAPI, snapshot.extensions);
+          if (lifecycle.disposed) return;
+          lastSignature = snapshotSignature(snapshot);
+          await lifecycle.settingsPanel(
+            extensionAPI,
+            createSettingsPanel({
+              extensions: snapshot.extensions,
+              onRefresh: () => refreshSettingsPanel({ syncGuidelines: true, allowShrink: true }),
+              onToggleExtension: handleToggleExtension,
+              onToggleGuidelines: handleToggleGuidelines,
+            }),
+          );
+        } while (panelDirty && !lifecycle.disposed);
       } finally {
-        refreshing = false;
+        panelRunning = false;
+      }
+      if (syncGuidelines && !lifecycle.disposed && isGuidelinesIndexEnabled(extensionAPI)) {
+        await scheduleGuidelinesReconcile({ allowShrink });
       }
     };
 
+    // Read-only AI tool calls update the settings panel lazily without issuing graph writes.
     const onSnapshot = (snapshot) => {
+      if (lifecycle.disposed) return;
       const nextSignature = snapshotSignature(snapshot);
       if (nextSignature !== lastSignature) {
-        void refreshSettingsPanel(snapshot, { syncGuidelines: true }).catch((error) => {
+        void refreshSettingsPanel({ syncGuidelines: false }).catch((error) => {
           console.warn(`${LOG_PREFIX} Settings panel refresh failed`, error);
         });
       }
     };
 
-    await refreshSettingsPanel(undefined, { syncGuidelines: true });
+    await refreshSettingsPanel({ syncGuidelines: true, allowShrink: false });
+    if (lifecycle.disposed) return async () => {};
 
     const tools = createHubTools({
       extensionAPI,
@@ -133,9 +172,10 @@ export async function onload({ extensionAPI, extension } = {}) {
       await lifecycle.command(extensionAPI.ui.commandPalette, {
         label: "Tool Hub: Refresh registry & settings",
         callback: () => {
-          void refreshSettingsPanel(undefined, { syncGuidelines: true });
+          void refreshSettingsPanel({ syncGuidelines: true, allowShrink: true });
         },
       });
+      if (lifecycle.disposed) return async () => {};
     }
 
     setRuntimeVersion(version, lifecycle);
