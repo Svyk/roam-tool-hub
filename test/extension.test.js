@@ -86,3 +86,15 @@ test("a second load disposes the previous runtime before registering again", asy
   assert.equal(secondApi.calls.filter(([name]) => name === "command:add").length, 1);
   await cleanup();
 });
+
+test("onunload preserves the guidelines index block and stored uid", async () => {
+  const api = fakeExtensionApi();
+  await api.settings.set("guidelines-index-enabled", true);
+  await api.settings.set("guidelines-block-uid", "owned-block-1");
+
+  const cleanup = await extension.onload({ extensionAPI: api, extension: { version: "0.1.0-test" } });
+  await cleanup();
+  await extension.onunload();
+
+  assert.equal(api.settings.get("guidelines-block-uid"), "owned-block-1");
+});

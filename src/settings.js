@@ -47,6 +47,9 @@ export async function setGuidelinesBlockUid(extensionAPI, uid) {
 
 export async function seedExtensionDefaults(extensionAPI, extensions) {
   if (extensionAPI?.settings?.canSet === false) return;
+  if (extensionAPI.settings.get(SETTING_IDS.guidelinesEnabled) == null) {
+    await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, false);
+  }
   for (const ext of extensions) {
     const enabledId = extensionEnabledSettingId(ext.key);
     if (extensionAPI.settings.get(enabledId) == null) {
@@ -63,6 +66,7 @@ export function createSettingsPanel({
   extensions = [],
   onRefresh,
   onToggleExtension,
+  onToggleGuidelines,
 } = {}) {
   const settings = [
     {
@@ -76,6 +80,17 @@ export function createSettingsPanel({
         content: "Refresh",
         onClick: () => {
           void onRefresh?.();
+        },
+      },
+    },
+    {
+      id: SETTING_IDS.guidelinesEnabled,
+      name: "Publish index on roam/agent guidelines",
+      description: "Maintain one generated Tool Hub summary block on [[roam/agent guidelines]]. Turning this off removes that block.",
+      action: {
+        type: "switch",
+        onChange: (event) => {
+          void onToggleGuidelines?.(Boolean(event?.target?.checked));
         },
       },
     },

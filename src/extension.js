@@ -1,8 +1,15 @@
-import { HUB_VERSION, LOG_PREFIX, RUNTIME_VERSION_KEY } from "./constants.js";
+import { HUB_VERSION, LOG_PREFIX, RUNTIME_VERSION_KEY, SETTING_IDS } from "./constants.js";
+import { removeGuidelinesIndex, syncGuidelinesIndex } from "./guidelines-index.js";
 import { createHubTools, registerHubTools } from "./hub-tools.js";
 import { createLifecycle } from "./lifecycle.js";
 import { defaultRegistryGetter, readRegistrySnapshot } from "./registry.js";
-import { createSettingsPanel, seedExtensionDefaults } from "./settings.js";
+import {
+  createSettingsPanel,
+  extensionEnabledSettingId,
+  extensionWriteSettingId,
+  isGuidelinesIndexEnabled,
+  seedExtensionDefaults,
+} from "./settings.js";
 
 let activeLifecycle = null;
 
@@ -34,7 +41,52 @@ export async function onload({ extensionAPI, extension } = {}) {
     let lastSignature = null;
     let refreshing = false;
 
-    const refreshSettingsPanel = async (snapshot = readRegistrySnapshot(defaultRegistryGetter)) => {
+    const syncGuidelinesIfEnabled = async (forceEnabled) => {
+      if (lifecycle.disposed) return;
+      try {
+        await syncGuidelinesIndex({
+          extensionAPI,
+          getRegistry: defaultRegistryGetter,
+          forceEnabled,
+        });
+      } catch (error) {
+        console.warn(`${LOG_PREFIX} Guidelines index sync failed`, error);
+      }
+    };
+
+    const handleToggleGuidelines = async (checked) => {
+      if (lifecycle.disposed) return;
+      if (extensionAPI.settings?.canSet !== false) {
+        await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, checked);
+      }
+      if (checked) {
+        await syncGuidelinesIfEnabled(true);
+      } else {
+        try {
+          await removeGuidelinesIndex({ extensionAPI });
+        } catch (error) {
+          console.warn(`${LOG_PREFIX} Guidelines index removal failed`, error);
+        }
+      }
+    };
+
+    const handleToggleExtension = async (extKey, field, checked) => {
+      if (lifecycle.disposed) return;
+      const settingId = field === "write"
+        ? extensionWriteSettingId(extKey)
+        : extensionEnabledSettingId(extKey);
+      if (extensionAPI.settings?.canSet !== false) {
+        await extensionAPI.settings.set(settingId, checked);
+      }
+      if (isGuidelinesIndexEnabled(extensionAPI)) {
+        await syncGuidelinesIfEnabled(true);
+      }
+    };
+
+    const refreshSettingsPanel = async (
+      snapshot = readRegistrySnapshot(defaultRegistryGetter),
+      { syncGuidelines = false } = {},
+    ) => {
       if (lifecycle.disposed || refreshing) return;
       refreshing = true;
       try {
@@ -45,9 +97,14 @@ export async function onload({ extensionAPI, extension } = {}) {
           extensionAPI,
           createSettingsPanel({
             extensions: snapshot.extensions,
-            onRefresh: () => refreshSettingsPanel(),
+            onRefresh: () => refreshSettingsPanel(undefined, { syncGuidelines: true }),
+            onToggleExtension: handleToggleExtension,
+            onToggleGuidelines: handleToggleGuidelines,
           }),
         );
+        if (syncGuidelines && isGuidelinesIndexEnabled(extensionAPI)) {
+          await syncGuidelinesIfEnabled(true);
+        }
       } finally {
         refreshing = false;
       }
@@ -56,13 +113,13 @@ export async function onload({ extensionAPI, extension } = {}) {
     const onSnapshot = (snapshot) => {
       const nextSignature = snapshotSignature(snapshot);
       if (nextSignature !== lastSignature) {
-        void refreshSettingsPanel(snapshot).catch((error) => {
+        void refreshSettingsPanel(snapshot, { syncGuidelines: true }).catch((error) => {
           console.warn(`${LOG_PREFIX} Settings panel refresh failed`, error);
         });
       }
     };
 
-    await refreshSettingsPanel();
+    await refreshSettingsPanel(undefined, { syncGuidelines: true });
 
     const tools = createHubTools({
       extensionAPI,
@@ -76,7 +133,7 @@ export async function onload({ extensionAPI, extension } = {}) {
       await lifecycle.command(extensionAPI.ui.commandPalette, {
         label: "Tool Hub: Refresh registry & settings",
         callback: () => {
-          void refreshSettingsPanel();
+          void refreshSettingsPanel(undefined, { syncGuidelines: true });
         },
       });
     }
@@ -90,6 +147,7 @@ export async function onload({ extensionAPI, extension } = {}) {
   }
 
   // Roam invokes this cleanup immediately before onunload.
+  // Unload intentionally does NOT remove the guidelines index block because reload triggers onunload.
   return async () => {
     if (activeLifecycle === lifecycle) activeLifecycle = null;
     await lifecycle.dispose();
