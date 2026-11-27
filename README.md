@@ -1,6 +1,6 @@
 # Tool Hub
 
-A zero-runtime-dependency Roam Depot extension that exposes every tool registered on `window.RoamExtensionTools` to Roam's native AI surfaces (built-in chat, Ask AI, local MCP, and CLI) through five small native AI tools—without loading dozens of tool schemas into every session.
+A zero-runtime-dependency Roam Depot extension that exposes every tool registered on `window.RoamExtensionTools` to Roam's local AI surfaces (local MCP, CLI, Local API, and Roam's built-in chat once Roam enables `call_extension_tool` in `app-agent.js`) through five small native AI tools—without loading dozens of tool schemas into every session.
 
 ## Registered AI tools
 
