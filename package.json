@@ -1,6 +1,6 @@
 {
   "name": "roam-tool-hub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "One small set of AI tools that lets Roam chat and the Roam MCP find and run every extension's tools",
   "type": "module",

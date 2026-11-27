@@ -35,6 +35,11 @@ export function isGuidelinesIndexEnabled(extensionAPI) {
   return value === true;
 }
 
+export function isCmdJBridgeEnabled(extensionAPI) {
+  const value = extensionAPI?.settings?.get?.(SETTING_IDS.cmdJBridgeEnabled);
+  return value === true;
+}
+
 export function getGuidelinesBlockUid(extensionAPI) {
   const value = extensionAPI?.settings?.get?.(SETTING_IDS.guidelinesBlockUid);
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -49,6 +54,9 @@ export async function seedExtensionDefaults(extensionAPI, extensions) {
   if (extensionAPI?.settings?.canSet === false) return;
   if (extensionAPI.settings.get(SETTING_IDS.guidelinesEnabled) == null) {
     await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, false);
+  }
+  if (extensionAPI.settings.get(SETTING_IDS.cmdJBridgeEnabled) == null) {
+    await extensionAPI.settings.set(SETTING_IDS.cmdJBridgeEnabled, false);
   }
   for (const ext of extensions) {
     const enabledId = extensionEnabledSettingId(ext.key);
@@ -67,6 +75,7 @@ export function createSettingsPanel({
   onRefresh,
   onToggleExtension,
   onToggleGuidelines,
+  onToggleCmdJBridge,
 } = {}) {
   const settings = [
     {
@@ -91,6 +100,17 @@ export function createSettingsPanel({
         type: "switch",
         onChange: (event) => {
           void onToggleGuidelines?.(Boolean(event?.target?.checked));
+        },
+      },
+    },
+    {
+      id: SETTING_IDS.cmdJBridgeEnabled,
+      name: "Enable Cmd-J inbox bridge",
+      description: "Watch [[roam/tool-hub/inbox]] so Roam's built-in Cmd-J chat can invoke Tool Hub via create_block + get_block (respects all switches below).",
+      action: {
+        type: "switch",
+        onChange: (event) => {
+          void onToggleCmdJBridge?.(Boolean(event?.target?.checked));
         },
       },
     },

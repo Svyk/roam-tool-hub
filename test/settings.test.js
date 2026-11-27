@@ -48,25 +48,30 @@ test("defaults are read tools on and writing tools off for newly seen extensions
   assert.equal(isExtensionWriteEnabled(api, "roam-grid"), true);
 });
 
-test("createSettingsPanel creates refresh button, guidelines toggle, and two switches per extension", () => {
+test("createSettingsPanel creates refresh button, guidelines toggle, Cmd-J bridge toggle, and two switches per extension", () => {
   let refreshed = 0;
   let toggledGuidelines = null;
+  let toggledBridge = null;
   const panel = createSettingsPanel({
     extensions: [
       { key: "roam-grid", name: "Roam Grid", toolCount: 24, readCount: 5, writeCount: 19 },
     ],
     onRefresh: () => { refreshed += 1; },
     onToggleGuidelines: (checked) => { toggledGuidelines = checked; },
+    onToggleCmdJBridge: (checked) => { toggledBridge = checked; },
   });
 
   assert.equal(panel.tabTitle, "Tool Hub");
-  assert.equal(panel.settings.length, 4);
+  assert.equal(panel.settings.length, 5);
   assert.equal(panel.settings[0].action.type, "button");
   panel.settings[0].action.onClick();
   assert.equal(refreshed, 1);
   assert.equal(panel.settings[1].action.type, "switch");
   panel.settings[1].action.onChange({ target: { checked: true } });
   assert.equal(toggledGuidelines, true);
-  assert.equal(panel.settings[2].id, extensionEnabledSettingId("roam-grid"));
-  assert.equal(panel.settings[3].id, extensionWriteSettingId("roam-grid"));
+  assert.equal(panel.settings[2].action.type, "switch");
+  panel.settings[2].action.onChange({ target: { checked: true } });
+  assert.equal(toggledBridge, true);
+  assert.equal(panel.settings[3].id, extensionEnabledSettingId("roam-grid"));
+  assert.equal(panel.settings[4].id, extensionWriteSettingId("roam-grid"));
 });

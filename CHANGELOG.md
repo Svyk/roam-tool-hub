@@ -4,6 +4,13 @@ All notable changes to this project follow [Keep a Changelog](https://keepachang
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+### Added
+
+- Opt-in **Cmd-J inbox bridge** (`cmd-j-bridge-enabled`, default OFF) watching `[[roam/tool-hub/inbox]]` via a single `addPullWatch` so Roam's built-in `Cmd-J` chat can invoke all 5 Tool Hub actions via `create_block` + `get_block` with full switch/schema enforcement, cross-tab Web Locks deduplication, pre-existing-block replay protection, and automatic history pruning.
+- Automatic Cmd-J inbox protocol instructions (with exact inbox page UID) included in the `roam/agent guidelines` block when both settings are enabled.
+
 ## [0.1.0] - 2026-11-26
 
 ### Added

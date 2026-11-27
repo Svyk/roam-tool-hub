@@ -1,6 +1,9 @@
 import {
   GUIDELINES_PAGE_TITLE,
   GUIDELINES_SUMMARY_THRESHOLD,
+  INBOX_CALL_PREFIX,
+  INBOX_PAGE_TITLE,
+  INBOX_RESULT_PREFIX,
 } from "./constants.js";
 import { defaultRegistryGetter, readRegistrySnapshot } from "./registry.js";
 import {
@@ -103,11 +106,32 @@ async function withGuidelinesLock(roamAlphaAPI, fn) {
   return await locks.request(lockName, async () => await fn());
 }
 
-export function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = () => false } = {}) {
+function buildCmdJBridgeInstruction(inboxPageUid) {
+  if (!inboxPageUid) return null;
+  const safeUid = sanitizeRoamMarkup(inboxPageUid);
+  return (
+    `Built-in Cmd-J chat bridge (active): If \`call_extension_tool\` is not in your tool list, `
+    + `call \`create_block\` on page \`${INBOX_PAGE_TITLE}\` (parent uid \`${safeUid}\`) with text `
+    + `\`${INBOX_CALL_PREFIX} {"action":"find_tools","extension":"roam-grid"}\` `
+    + `(actions: \`list_extensions\`, \`find_tools\`, \`describe_tools\`, \`run_read_tool\`, \`run_tool\`), `
+    + `then call \`get_block\` on the created block uid to read the \`${INBOX_RESULT_PREFIX}\` child block.`
+  );
+}
+
+export function buildGuidelinesIndexModel({
+  extensions = [],
+  isWriteEnabled = () => false,
+  inboxPageUid = null,
+} = {}) {
+  const prefixLines = [];
+  const bridgeLine = buildCmdJBridgeInstruction(inboxPageUid);
+  if (bridgeLine) prefixLines.push(bridgeLine);
+
   if (extensions.length === 0) {
     return {
       heading: GUIDELINES_HEADING,
       children: [
+        ...prefixLines,
         "No extensions currently enabled in Tool Hub. Call list_extensions to check live tools.",
       ],
     };
@@ -122,7 +146,7 @@ export function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = ()
       const safeSummary = sanitizeRoamMarkup(ext.summary);
       return `**${safeName}** (\`${safeKey}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${safeSummary}`;
     });
-    return { heading: GUIDELINES_HEADING, children };
+    return { heading: GUIDELINES_HEADING, children: [...prefixLines, ...children] };
   }
 
   const groups = new Map();
@@ -150,7 +174,7 @@ export function buildGuidelinesIndexModel({ extensions = [], isWriteEnabled = ()
   children.push(
     `Total: ${extensions.length} enabled extensions (${totalTools} tools). Call list_extensions to browse them.`,
   );
-  return { heading: GUIDELINES_HEADING, children };
+  return { heading: GUIDELINES_HEADING, children: [...prefixLines, ...children] };
 }
 
 export async function syncGuidelinesIndex({
@@ -159,6 +183,7 @@ export async function syncGuidelinesIndex({
   getRegistry = defaultRegistryGetter,
   forceEnabled,
   allowShrink = true,
+  inboxPageUid = null,
 } = {}) {
   const enabled = forceEnabled !== undefined ? Boolean(forceEnabled) : isGuidelinesIndexEnabled(extensionAPI);
   if (!enabled) {
@@ -182,6 +207,7 @@ export async function syncGuidelinesIndex({
     const model = buildGuidelinesIndexModel({
       extensions: enabledExts,
       isWriteEnabled: (key) => isExtensionWriteEnabled(extensionAPI, key),
+      inboxPageUid,
     });
 
     let page = pullGuidelinesPage(roamAlphaAPI);
