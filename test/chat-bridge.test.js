@@ -501,3 +501,110 @@ test("without a window the bridge builds, refuses to attach and detaches cleanly
   bridge.detach();
   return bridge.refresh();
 });
+
+test("native tools use stale-while-revalidate: first read waits, later stale reads return cached at once and reinstall in background", async () => {
+  const boardListTool = {
+    tool: "https://x.github.io/plexus-diagram//list_boards",
+    extension: "https://x.github.io/plexus-diagram/",
+    description: "List boards.",
+    scope: "read",
+  };
+  const boardReadTool = {
+    tool: "https://x.github.io/plexus-diagram//read_board",
+    extension: "https://x.github.io/plexus-diagram/",
+    description: "Read a board.",
+    scope: "read",
+  };
+
+  let calls = 0;
+  let resolveFirst;
+  let resolveSecond;
+  const ctx = setup({
+    bridgeOptions: {
+      nativeToolsTimeoutMs: 500,
+      nativeToolsTtlMs: 0,
+      getNativeTools: () => {
+        calls += 1;
+        if (calls === 1) return new Promise((resolve) => { resolveFirst = resolve; });
+        return new Promise((resolve) => { resolveSecond = resolve; });
+      },
+    },
+  });
+
+  ctx.bridge.attach();
+  await waitFor(() => typeof resolveFirst === "function", "first native read started");
+  assert.equal(ctx.bridge.status().phase, "starting");
+  resolveFirst([boardListTool]);
+  await waitFor(() => ctx.bridge.status().phase === "ready", "ready after first native read");
+
+  const chat = await bootRoamChat(ctx.pi);
+  const conversation = await chat.harness.createConversation({}, {});
+  // Second turn triggers a stale read: must complete immediately using the cached list
+  // while the second getNativeTools() promise is still unresolved.
+  await roamTurn(conversation, chat.roamTools, { mode: "edit" });
+  assert.equal(calls, 2);
+  assert.equal(typeof resolveSecond, "function");
+  let callable = toolNames(await conversation.agent({}), "callable");
+  assert.ok(callable.includes("list_boards"));
+  assert.equal(callable.includes("read_board"), false);
+
+  // Another stale turn while the background read is still in flight deduplicates the fetch.
+  await roamTurn(conversation, chat.roamTools, { mode: "edit" });
+  assert.equal(calls, 2);
+
+  // When the background fetch resolves with an updated list, the registry is reinstalled.
+  resolveSecond([boardListTool, boardReadTool]);
+  await waitFor(
+    () => chat.registry.snapshot().extension(CHAT_EXTENSION_NAME)?.tools?.some((t) => t.name === "read_board"),
+    "background native refresh reinstalled",
+  );
+  await roamTurn(conversation, chat.roamTools, { mode: "edit" });
+  callable = toolNames(await conversation.agent({}), "callable");
+  assert.ok(callable.includes("read_board"));
+});
+
+test("background native refresh after detach does not reinstall the extension", async () => {
+  const boardListTool = {
+    tool: "https://x.github.io/plexus-diagram//list_boards",
+    extension: "https://x.github.io/plexus-diagram/",
+    description: "List boards.",
+    scope: "read",
+  };
+  let calls = 0;
+  let resolveSecond;
+  const ctx = setup({
+    bridgeOptions: {
+      nativeToolsTtlMs: 0,
+      getNativeTools: () => {
+        calls += 1;
+        if (calls === 1) return Promise.resolve([]);
+        return new Promise((resolve) => { resolveSecond = resolve; });
+      },
+    },
+  });
+  const { registry } = await attachAndBoot(ctx);
+  await waitFor(() => typeof resolveSecond === "function", "background refresh started");
+  ctx.bridge.detach();
+  resolveSecond([boardListTool]);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(registry.snapshot().extension(CHAT_EXTENSION_NAME), undefined);
+});
+
+test("preload filters carried-over loaded tools when access changes to read-only or an extension is disabled", async () => {
+  const ctx = setup();
+  const { conversation, roamTools } = await attachAndBoot(ctx, { mode: "edit", content: SORT_REQUEST });
+  assert.ok(toolNames(await conversation.agent({})).includes("rg_sort"));
+
+  // Switch the same conversation to read-only and trigger a Better Tasks preload.
+  await roamTurn(conversation, roamTools, { mode: "read", content: "Show my overdue tasks" });
+  assert.equal(conversation.config.modelTools.add.includes("rg_sort"), false);
+  assert.ok(conversation.config.modelTools.add.includes("bt_search"));
+
+  // Back in edit mode, disable Roam Grid mid-chat and trigger another preload.
+  ctx.settingValues[extensionEnabledSettingId("roam-grid")] = false;
+  await ctx.bridge.refresh();
+  await roamTurn(conversation, roamTools, { mode: "edit", content: "Give me an oblique strategy" });
+  assert.equal(conversation.config.modelTools.add.some((name) => name.startsWith("rg_")), false);
+  assert.ok(conversation.config.modelTools.add.includes("os_random_strategy"));
+});

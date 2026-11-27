@@ -1,7 +1,7 @@
-/* Tool Hub v0.4.0 | MIT | generated; edit src/ */
+/* Tool Hub v0.4.1 | MIT | generated; edit src/ */
 
 // src/constants.js
-var HUB_VERSION = "0.4.0";
+var HUB_VERSION = "0.4.1";
 var LOG_PREFIX = "[roam-tool-hub]";
 var RUNTIME_VERSION_KEY = "__ROAM_TOOL_HUB_VERSION";
 var MAX_TOOL_DESCRIPTION_CHARS = 300;
@@ -395,6 +395,8 @@ var MAX_SUMMARY_CHARS2 = 140;
 var MAX_INDEX_NAMES_PER_EXTENSION = 40;
 var MAX_INDEX_NAMES_TOTAL = 160;
 var MAX_QUERY_TOKENS = 60;
+var MAX_QUERY_HEAD_TOKENS = 25;
+var MAX_QUERY_TAIL_TOKENS = MAX_QUERY_TOKENS - MAX_QUERY_HEAD_TOKENS;
 var CHAT_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 var HUB_SIGNATURE_NAMES = ["list_extensions", "describe_tools", "run_read_tool"];
 var COMPANION_NAME_TOKENS = /* @__PURE__ */ new Map([["search", 2], ["list", 2], ["find", 2], ["get", 1], ["read", 1]]);
@@ -419,6 +421,7 @@ var GENERIC_TOKENS = /* @__PURE__ */ new Set([
   "edit",
   "open",
   "run",
+  "export",
   "name",
   "value",
   "text",
@@ -639,13 +642,14 @@ function tokenize(text) {
   }
   return out;
 }
-function tokensMatch(a, b) {
-  if (a === b) return true;
-  const shorter = Math.min(a.length, b.length);
+function tokensMatch(queryToken, docToken) {
+  if (queryToken === docToken) return true;
+  const shorter = Math.min(queryToken.length, docToken.length);
   if (shorter < 4) return false;
   let common = 0;
-  while (common < shorter && a.charCodeAt(common) === b.charCodeAt(common)) common += 1;
-  return common >= Math.max(4, shorter - 1);
+  while (common < shorter && queryToken.charCodeAt(common) === docToken.charCodeAt(common)) common += 1;
+  if (common >= Math.max(4, shorter - 1)) return true;
+  return docToken.length >= 5 && queryToken.length >= docToken.length + 3 && !GENERIC_TOKENS.has(docToken) && queryToken.endsWith(docToken);
 }
 function buildSearchIndex(tools) {
   const docs = tools.map((tool) => {
@@ -668,8 +672,9 @@ function buildSearchIndex(tools) {
   return { docs, idf };
 }
 function rankTools(catalog, text) {
-  const queryTokens = tokenize(text).slice(0, MAX_QUERY_TOKENS);
-  if (queryTokens.length === 0) return [];
+  const allTokens = tokenize(text);
+  if (allTokens.length === 0) return [];
+  const queryTokens = allTokens.length <= MAX_QUERY_TOKENS ? allTokens : [...allTokens.slice(0, MAX_QUERY_HEAD_TOKENS), ...allTokens.slice(-MAX_QUERY_TAIL_TOKENS)];
   const { docs, idf } = catalog.searchIndex;
   const ranked = [];
   for (const doc of docs) {
@@ -679,11 +684,12 @@ function rankTools(catalog, text) {
       for (const field of doc.fields) {
         for (const token of field.tokens) {
           if (!tokensMatch(queryToken, token)) continue;
-          const value = idf(token) * field.weight;
+          const generic = GENERIC_TOKENS.has(queryToken) || GENERIC_TOKENS.has(token);
+          const value = idf(token) * field.weight * (generic ? GENERIC_TOKEN_WEIGHT : 1);
           if (value > best) best = value;
         }
       }
-      score += GENERIC_TOKENS.has(queryToken) ? best * GENERIC_TOKEN_WEIGHT : best;
+      score += best;
     }
     if (score > 0) ranked.push({ tool: doc.tool, score });
   }
@@ -836,6 +842,9 @@ function extensionMatches(tool, filter) {
   if (!needle) return true;
   return tool.extensionKey.toLowerCase().includes(needle) || tool.extensionName.toLowerCase().includes(needle);
 }
+function companionRank(tool) {
+  return Math.max(0, ...tool.name.toLowerCase().split(/[^a-z0-9]+/).map((token) => COMPANION_NAME_TOKENS.get(token) ?? 0));
+}
 function suggestTools(catalog, text, { access = "edit", exclude = [], max = MAX_PRELOAD } = {}) {
   const skip = new Set(exclude);
   const ranked = rankTools(catalog, text).filter((row) => isToolAllowed(row.tool, access));
@@ -847,17 +856,16 @@ function suggestTools(catalog, text, { access = "edit", exclude = [], max = MAX_
   const scoreByName = new Map(ranked.map((row) => [row.tool.chatName, row.score]));
   for (const extensionKey of new Set(primary.map((tool) => tool.extensionKey))) {
     if (picked.length >= max) break;
-    const candidates = catalog.tools.filter((tool) => tool.extensionKey === extensionKey && tool.readOnly && !pickedNames.has(tool.chatName)).map((tool) => ({
-      tool,
-      rank: Math.max(0, ...tool.name.toLowerCase().split(/[^a-z0-9]+/).map((token) => COMPANION_NAME_TOKENS.get(token) ?? 0))
-    })).filter((row) => row.rank > 0);
-    const locator = candidates.filter((row) => row.rank === 2).sort((a, b) => a.tool.order - b.tool.order)[0];
-    const rest = candidates.filter((row) => row !== locator).sort((a, b) => (scoreByName.get(b.tool.chatName) ?? 0) - (scoreByName.get(a.tool.chatName) ?? 0) || a.tool.order - b.tool.order);
-    const companions = [locator, rest[0]].filter(Boolean).map((row) => row.tool);
-    for (const tool of companions) {
-      if (picked.length >= max) break;
-      picked.push(tool);
-      pickedNames.add(tool.chatName);
+    const present = catalog.tools.filter((tool) => tool.extensionKey === extensionKey && tool.readOnly && (pickedNames.has(tool.chatName) || skip.has(tool.chatName)));
+    const hasLocator = present.some((tool) => companionRank(tool) === 2);
+    const hasReader = present.some((tool) => companionRank(tool) === 1);
+    const candidates = catalog.tools.filter((tool) => tool.extensionKey === extensionKey && tool.readOnly && !pickedNames.has(tool.chatName) && !skip.has(tool.chatName)).map((tool) => ({ tool, rank: companionRank(tool) })).filter((row) => row.rank > 0);
+    const locator = hasLocator ? null : candidates.filter((row) => row.rank === 2).sort((a, b) => a.tool.order - b.tool.order)[0];
+    const reader = hasReader ? null : candidates.filter((row) => row.rank === 1 && row !== locator).sort((a, b) => (scoreByName.get(b.tool.chatName) ?? 0) - (scoreByName.get(a.tool.chatName) ?? 0) || a.tool.order - b.tool.order)[0];
+    for (const row of [locator, reader]) {
+      if (!row || picked.length >= max) continue;
+      picked.push(row.tool);
+      pickedNames.add(row.tool.chatName);
     }
   }
   return picked.filter((tool) => !skip.has(tool.chatName));
@@ -1554,7 +1562,7 @@ var RUNTIME_GLOBAL = "PiHarness";
 var ROAM_EXTENSION_NAME = "roam";
 var ROAM_CHAT_MARKER_TOOLS = ["get_page", "search"];
 var NATIVE_TOOLS_TTL_MS = 15e3;
-var NATIVE_TOOLS_TIMEOUT_MS = 1500;
+var NATIVE_TOOLS_TIMEOUT_MS = 4e3;
 var DISCOVERY_TIMEOUT_MS = 1e4;
 var MAX_LOADED_PER_CONVERSATION = 24;
 var MAX_TRACKED_CONVERSATIONS = 200;
@@ -1649,6 +1657,8 @@ function createChatBridge({
   readBlockText: readBlockText2 = () => "",
   onStatus,
   maxResultChars = MAX_RESULT_CHARS,
+  nativeToolsTimeoutMs = NATIVE_TOOLS_TIMEOUT_MS,
+  nativeToolsTtlMs = NATIVE_TOOLS_TTL_MS,
   logger = console
 } = {}) {
   const hasWindow = Boolean(windowRef);
@@ -1660,7 +1670,8 @@ function createChatBridge({
   let catalog = emptyChatCatalog();
   let installedNames = /* @__PURE__ */ new Set();
   let refreshing = null;
-  let nativeCache = { at: 0, tools: [] };
+  let nativeCache = { at: 0, tools: [], ready: false };
+  let nativeRefreshing = null;
   const warned = /* @__PURE__ */ new Set();
   const stats = { turns: 0, preloads: 0, finds: 0, calls: 0, blocked: 0, errors: 0 };
   function warnOnce(key, error) {
@@ -1715,34 +1726,67 @@ function createChatBridge({
       conv.loaded.delete(conv.loaded.values().next().value);
     }
   }
+  function applyCatalog(nativeTools, { force = false } = {}) {
+    const snapshot = getRegistrySnapshot();
+    const next = buildChatCatalog({
+      registryExtensions: snapshot?.extensions ?? [],
+      nativeExtensions: readNativeExtensions(nativeTools),
+      extensionAPI
+    });
+    const changed = next.signature !== catalog.signature;
+    if (changed) catalog = next;
+    if (changed || force) {
+      for (const registry of state.registries) installInto(registry);
+      setStatus({});
+    }
+  }
+  function fetchNativeTools() {
+    if (nativeRefreshing) return nativeRefreshing;
+    nativeRefreshing = (async () => {
+      try {
+        const tools = await withTimeout(
+          Promise.resolve(getNativeTools2()),
+          nativeToolsTimeoutMs,
+          "Reading native extension tools"
+        );
+        nativeCache = { at: Date.now(), tools: Array.isArray(tools) ? tools : [], ready: true };
+        return true;
+      } catch (error) {
+        warnOnce("native extension tools could not be read", error);
+        nativeCache = { at: Date.now(), tools: nativeCache.tools, ready: true };
+        return false;
+      } finally {
+        nativeRefreshing = null;
+      }
+    })();
+    return nativeRefreshing;
+  }
+  function revalidateNativeTools() {
+    if (nativeRefreshing) return;
+    void fetchNativeTools().then((ok) => {
+      if (!attached || !ok) return;
+      try {
+        applyCatalog(nativeCache.tools);
+      } catch (error) {
+        warnOnce("updating native extension tools failed", error);
+      }
+    });
+  }
   async function readNativeTools(force) {
-    const now = Date.now();
-    if (!force && now - nativeCache.at < NATIVE_TOOLS_TTL_MS) return nativeCache.tools;
-    try {
-      const tools = await withTimeout(Promise.resolve(getNativeTools2()), NATIVE_TOOLS_TIMEOUT_MS, "Reading native extension tools");
-      nativeCache = { at: Date.now(), tools: Array.isArray(tools) ? tools : [] };
-    } catch (error) {
-      warnOnce("native extension tools could not be read", error);
-      nativeCache = { at: Date.now(), tools: nativeCache.tools };
+    if (!nativeCache.ready) {
+      await fetchNativeTools();
+      return nativeCache.tools;
+    }
+    if (force || Date.now() - nativeCache.at >= nativeToolsTtlMs) {
+      revalidateNativeTools();
     }
     return nativeCache.tools;
   }
   function refresh({ force = false } = {}) {
     if (refreshing) return force ? refreshing.then(() => refresh({ force })) : refreshing;
     refreshing = (async () => {
-      const snapshot = getRegistrySnapshot();
       const native = await readNativeTools(force);
-      const next = buildChatCatalog({
-        registryExtensions: snapshot?.extensions ?? [],
-        nativeExtensions: readNativeExtensions(native),
-        extensionAPI
-      });
-      const changed = next.signature !== catalog.signature;
-      if (changed) catalog = next;
-      if (changed || force) {
-        for (const registry of state.registries) installInto(registry);
-        setStatus({});
-      }
+      applyCatalog(native, { force });
     })().finally(() => {
       refreshing = null;
     });
@@ -1963,9 +2007,14 @@ function createChatBridge({
     const picks = suggestTools(catalog, text, { access: conv.access, exclude: [...conv.loaded], max: MAX_PRELOAD }).map((tool) => tool.chatName).filter((name) => installedNames.has(name));
     if (picks.length === 0) return;
     rememberLoaded(conv, picks);
+    const activeLoaded = [...conv.loaded].filter((name) => {
+      if (!installedNames.has(name)) return false;
+      const entry = catalog.byName.get(name);
+      return Boolean(entry && (entry.readOnly || conv.access !== "read"));
+    });
     await originalConfigure.call(
       conversation,
-      { modelTools: { add: [...conv.loaded].map((name) => ({ name })) } },
+      { modelTools: { add: activeLoaded.map((name) => ({ name })) } },
       context
     );
     stats.preloads += 1;

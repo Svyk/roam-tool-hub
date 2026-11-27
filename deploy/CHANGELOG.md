@@ -4,6 +4,16 @@ All notable changes to this project follow [Keep a Changelog](https://keepachang
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-27
+
+### Fixed
+
+- Auto-load now matches compound query words that end with a specific tool word (for example, "whiteboards" matches `list_boards` and `read_board`) without matching generic action suffixes like "proofread" or "checklist".
+- Native extension tool discovery is now stale-while-revalidate: the first read waits up to 4 seconds instead of timing out at 1.5 seconds, and later stale reads return the cached list immediately while refreshing in the background and reinstalling only when the list changes.
+- Long prompts over 60 unique tokens now keep both the start and end of the message when ranking tools, so requests written after pasted context still auto-load the right tools.
+- Auto-load companion selection no longer pulls in extra `list_*` tools (such as `bt_list_templates` or `rg_list_templates`) when a locator is already selected or loaded, and generic matched tokens (`export`, `name`) are weighted down consistently.
+- Preload `modelTools.add` updates now filter carried-over loaded names against the active catalog and conversation access mode, matching `configure`.
+
 ## [0.4.0] - 2026-11-27
 
 ### Added

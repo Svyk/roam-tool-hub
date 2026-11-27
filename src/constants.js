@@ -1,4 +1,4 @@
-export const HUB_VERSION = "0.4.0";
+export const HUB_VERSION = "0.4.1";
 export const LOG_PREFIX = "[roam-tool-hub]";
 export const RUNTIME_VERSION_KEY = "__ROAM_TOOL_HUB_VERSION";
 

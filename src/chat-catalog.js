@@ -17,6 +17,8 @@ const MAX_SUMMARY_CHARS = 140;
 const MAX_INDEX_NAMES_PER_EXTENSION = 40;
 const MAX_INDEX_NAMES_TOTAL = 160;
 const MAX_QUERY_TOKENS = 60;
+const MAX_QUERY_HEAD_TOKENS = 25;
+const MAX_QUERY_TAIL_TOKENS = MAX_QUERY_TOKENS - MAX_QUERY_HEAD_TOKENS;
 const CHAT_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HUB_SIGNATURE_NAMES = ["list_extensions", "describe_tools", "run_read_tool"];
 const COMPANION_NAME_TOKENS = new Map([["search", 2], ["list", 2], ["find", 2], ["get", 1], ["read", 1]]);
@@ -24,8 +26,8 @@ const COMPANION_NAME_TOKENS = new Map([["search", 2], ["list", 2], ["find", 2], 
 // extension and count for little when deciding whether an extension is relevant at all.
 const GENERIC_TOKENS = new Set([
   "list", "get", "create", "add", "set", "delete", "remove", "find", "search", "update", "modify",
-  "insert", "apply", "return", "read", "write", "change", "edit", "open", "run", "name", "value",
-  "text", "item", "thing", "first", "last", "next", "current", "today", "day",
+  "insert", "apply", "return", "read", "write", "change", "edit", "open", "run", "export", "name",
+  "value", "text", "item", "thing", "first", "last", "next", "current", "today", "day",
 ]);
 const GENERIC_TOKEN_WEIGHT = 0.4;
 
@@ -171,13 +173,20 @@ export function tokenize(text) {
   return out;
 }
 
-function tokensMatch(a, b) {
-  if (a === b) return true;
-  const shorter = Math.min(a.length, b.length);
+function tokensMatch(queryToken, docToken) {
+  if (queryToken === docToken) return true;
+  const shorter = Math.min(queryToken.length, docToken.length);
   if (shorter < 4) return false;
   let common = 0;
-  while (common < shorter && a.charCodeAt(common) === b.charCodeAt(common)) common += 1;
-  return common >= Math.max(4, shorter - 1);
+  while (common < shorter && queryToken.charCodeAt(common) === docToken.charCodeAt(common)) common += 1;
+  if (common >= Math.max(4, shorter - 1)) return true;
+  // A long compound query word whose suffix is a specific known word ("whiteboard" -> "board").
+  return (
+    docToken.length >= 5
+    && queryToken.length >= docToken.length + 3
+    && !GENERIC_TOKENS.has(docToken)
+    && queryToken.endsWith(docToken)
+  );
 }
 
 function buildSearchIndex(tools) {
@@ -203,8 +212,11 @@ function buildSearchIndex(tools) {
 
 /** Scores every catalog tool against free text. Highest first; zero scores dropped. */
 export function rankTools(catalog, text) {
-  const queryTokens = tokenize(text).slice(0, MAX_QUERY_TOKENS);
-  if (queryTokens.length === 0) return [];
+  const allTokens = tokenize(text);
+  if (allTokens.length === 0) return [];
+  const queryTokens = allTokens.length <= MAX_QUERY_TOKENS
+    ? allTokens
+    : [...allTokens.slice(0, MAX_QUERY_HEAD_TOKENS), ...allTokens.slice(-MAX_QUERY_TAIL_TOKENS)];
   const { docs, idf } = catalog.searchIndex;
   const ranked = [];
   for (const doc of docs) {
@@ -214,11 +226,12 @@ export function rankTools(catalog, text) {
       for (const field of doc.fields) {
         for (const token of field.tokens) {
           if (!tokensMatch(queryToken, token)) continue;
-          const value = idf(token) * field.weight;
+          const generic = GENERIC_TOKENS.has(queryToken) || GENERIC_TOKENS.has(token);
+          const value = idf(token) * field.weight * (generic ? GENERIC_TOKEN_WEIGHT : 1);
           if (value > best) best = value;
         }
       }
-      score += GENERIC_TOKENS.has(queryToken) ? best * GENERIC_TOKEN_WEIGHT : best;
+      score += best;
     }
     if (score > 0) ranked.push({ tool: doc.tool, score });
   }
@@ -393,6 +406,10 @@ function extensionMatches(tool, filter) {
   return tool.extensionKey.toLowerCase().includes(needle) || tool.extensionName.toLowerCase().includes(needle);
 }
 
+function companionRank(tool) {
+  return Math.max(0, ...tool.name.toLowerCase().split(/[^a-z0-9]+/).map((token) => COMPANION_NAME_TOKENS.get(token) ?? 0));
+}
+
 /**
  * Tools worth putting in front of the model before it asks, judged from the person's own words.
  * Returns nothing unless at least one tool matches clearly.
@@ -409,23 +426,31 @@ export function suggestTools(catalog, text, { access = "edit", exclude = [], max
   const scoreByName = new Map(ranked.map((row) => [row.tool.chatName, row.score]));
   for (const extensionKey of new Set(primary.map((tool) => tool.extensionKey))) {
     if (picked.length >= max) break;
-    // One tool to locate things (search or list), then the best-matching other read tool.
+    // One locator (search/list/find) and one reader (get/read) per extension, unless one is
+    // already in primary or already loaded in this conversation.
+    const present = catalog.tools.filter((tool) => (
+      tool.extensionKey === extensionKey && tool.readOnly && (pickedNames.has(tool.chatName) || skip.has(tool.chatName))
+    ));
+    const hasLocator = present.some((tool) => companionRank(tool) === 2);
+    const hasReader = present.some((tool) => companionRank(tool) === 1);
     const candidates = catalog.tools
-      .filter((tool) => tool.extensionKey === extensionKey && tool.readOnly && !pickedNames.has(tool.chatName))
-      .map((tool) => ({
-        tool,
-        rank: Math.max(0, ...tool.name.toLowerCase().split(/[^a-z0-9]+/).map((token) => COMPANION_NAME_TOKENS.get(token) ?? 0)),
-      }))
+      .filter((tool) => (
+        tool.extensionKey === extensionKey && tool.readOnly && !pickedNames.has(tool.chatName) && !skip.has(tool.chatName)
+      ))
+      .map((tool) => ({ tool, rank: companionRank(tool) }))
       .filter((row) => row.rank > 0);
-    const locator = candidates.filter((row) => row.rank === 2).sort((a, b) => a.tool.order - b.tool.order)[0];
-    const rest = candidates
-      .filter((row) => row !== locator)
-      .sort((a, b) => (scoreByName.get(b.tool.chatName) ?? 0) - (scoreByName.get(a.tool.chatName) ?? 0) || a.tool.order - b.tool.order);
-    const companions = [locator, rest[0]].filter(Boolean).map((row) => row.tool);
-    for (const tool of companions) {
-      if (picked.length >= max) break;
-      picked.push(tool);
-      pickedNames.add(tool.chatName);
+    const locator = hasLocator
+      ? null
+      : candidates.filter((row) => row.rank === 2).sort((a, b) => a.tool.order - b.tool.order)[0];
+    const reader = hasReader
+      ? null
+      : candidates
+        .filter((row) => row.rank === 1 && row !== locator)
+        .sort((a, b) => (scoreByName.get(b.tool.chatName) ?? 0) - (scoreByName.get(a.tool.chatName) ?? 0) || a.tool.order - b.tool.order)[0];
+    for (const row of [locator, reader]) {
+      if (!row || picked.length >= max) continue;
+      picked.push(row.tool);
+      pickedNames.add(row.tool.chatName);
     }
   }
   return picked.filter((tool) => !skip.has(tool.chatName));

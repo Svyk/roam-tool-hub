@@ -167,6 +167,91 @@ test("suggestTools picks the right tools for clear requests", () => {
 
   assert.deepEqual(names("Give me an oblique strategy for this draft"), ["os_random_strategy"]);
   assert.ok(names("What are my waiting-for items?").includes("bt_get_waiting_for"));
+  assert.ok(names("Export every task in my graph as CSV.").includes("bt_export"));
+});
+
+test("suggestTools matches compound query words against native tools without matching generic suffixes", () => {
+  const native = readNativeExtensions([
+    {
+      tool: "https://x.github.io/plexus-diagram//list_boards",
+      extension: "https://x.github.io/plexus-diagram/",
+      description: "Lists the Plexus whiteboards in this graph with their uid, title, page and card count.",
+      scope: "read",
+    },
+    {
+      tool: "https://x.github.io/plexus-diagram//read_board",
+      extension: "https://x.github.io/plexus-diagram/",
+      description: "Reads cards, sections and arrows from one board.",
+      scope: "read",
+    },
+    {
+      tool: "https://x.github.io/plexus-diagram//add_cards",
+      extension: "https://x.github.io/plexus-diagram/",
+      description: "Adds cards to a board.",
+      scope: "edit",
+    },
+  ]);
+  const registry = buildRegistryFromFixture();
+  const snapshot = readRegistrySnapshot(() => registry);
+  // Default native write switch off, registry switches on.
+  const values = allOn(snapshot.extensions.map((ext) => ext.key));
+  const catalog = fixtureCatalog({ registry, native, values });
+  const names = (text) => suggestTools(catalog, text, { access: "edit" }).map((tool) => tool.chatName);
+
+  const boards = names("What whiteboards do I have, and what's on one of the smaller ones?");
+  assert.ok(boards.includes("list_boards"), boards.join());
+  assert.ok(boards.includes("read_board"), boards.join());
+
+  assert.deepEqual(names("Please proofread this paragraph and make a checklist"), []);
+  assert.deepEqual(names("Export my graph to an Anki flashcard deck (.apkg) and email it to me."), []);
+});
+
+test("suggestTools keeps head and tail tokens on very long prompts", () => {
+  const native = readNativeExtensions([
+    {
+      tool: "https://x.github.io/Roam-Task-Status-Tags//list_statuses",
+      extension: "https://x.github.io/Roam-Task-Status-Tags/",
+      description: "Lists every task status configured in this graph.",
+      scope: "read",
+    },
+  ]);
+  const catalog = fixtureCatalog({ native });
+  const background = [
+    "I have been reorganizing study notes covering microbiology food safety regulations statistical",
+    "process control charts thermal inactivation curves sampling plans laboratory validation protocols",
+    "equipment cleaning schedules allergen cross contact audits moisture activity thresholds shelf",
+    "modeling packaging integrity inspections supplier qualification binders deviation investigation",
+    "templates corrective action timelines preventive maintenance calendars calibration certificates",
+    "environmental swabbing zones biofilm resistance literature conference presentation drafts October November.",
+  ].join(" ");
+  const tailAsk = `${background} After all that background, please check what task statuses are configured and give me an oblique strategy.`;
+  const tailNames = suggestTools(catalog, tailAsk, { access: "edit" }).map((tool) => tool.chatName);
+  assert.ok(tailNames.includes("os_random_strategy"), tailNames.join());
+  assert.ok(tailNames.includes("list_statuses"), tailNames.join());
+
+  const headAsk = `Give me an oblique strategy for these notes: ${background}`;
+  const headNames = suggestTools(catalog, headAsk, { access: "edit" }).map((tool) => tool.chatName);
+  assert.ok(headNames.includes("os_random_strategy"), headNames.join());
+});
+
+test("suggestTools does not pull in extra template list companions when a locator is already present or loaded", () => {
+  const catalog = fixtureCatalog();
+  const createTask = suggestTools(
+    catalog,
+    "Create a task '[stress] Review lab checklist' due December 2, 2026 in the project Stress Test",
+    { access: "edit" },
+  ).map((tool) => tool.chatName);
+  assert.ok(createTask.includes("bt_create"), createTask.join());
+  assert.ok(createTask.includes("bt_search"), createTask.join());
+  assert.equal(createTask.includes("bt_list_templates"), false, createTask.join());
+
+  const formulaFollowUp = suggestTools(
+    catalog,
+    "Add a bottom row named Total with formulas summing the Caffeine and Price columns",
+    { access: "edit", exclude: ["rg_list_grids", "rg_get_grid"] },
+  ).map((tool) => tool.chatName);
+  assert.ok(formulaFollowUp.includes("rg_add_formula"), formulaFollowUp.join());
+  assert.equal(formulaFollowUp.includes("rg_list_templates"), false, formulaFollowUp.join());
 });
 
 test("suggestTools stays quiet for requests that need no extension", () => {

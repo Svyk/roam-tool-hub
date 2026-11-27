@@ -35,7 +35,7 @@ const RUNTIME_GLOBAL = "PiHarness";
 const ROAM_EXTENSION_NAME = "roam";
 const ROAM_CHAT_MARKER_TOOLS = ["get_page", "search"];
 const NATIVE_TOOLS_TTL_MS = 15_000;
-const NATIVE_TOOLS_TIMEOUT_MS = 1_500;
+const NATIVE_TOOLS_TIMEOUT_MS = 4_000;
 const DISCOVERY_TIMEOUT_MS = 10_000;
 const MAX_LOADED_PER_CONVERSATION = 24;
 const MAX_TRACKED_CONVERSATIONS = 200;
@@ -141,6 +141,8 @@ export function createChatBridge({
   readBlockText = () => "",
   onStatus,
   maxResultChars = MAX_RESULT_CHARS,
+  nativeToolsTimeoutMs = NATIVE_TOOLS_TIMEOUT_MS,
+  nativeToolsTtlMs = NATIVE_TOOLS_TTL_MS,
   logger = console,
 } = {}) {
   // Without a window (unit tests, a non-browser host) the bridge still builds and reports
@@ -155,7 +157,8 @@ export function createChatBridge({
   let catalog = emptyChatCatalog();
   let installedNames = new Set();
   let refreshing = null;
-  let nativeCache = { at: 0, tools: [] };
+  let nativeCache = { at: 0, tools: [], ready: false };
+  let nativeRefreshing = null;
   const warned = new Set();
   const stats = { turns: 0, preloads: 0, finds: 0, calls: 0, blocked: 0, errors: 0 };
 
@@ -222,15 +225,62 @@ export function createChatBridge({
 
   // ---- catalog -----------------------------------------------------------------
 
+  function applyCatalog(nativeTools, { force = false } = {}) {
+    const snapshot = getRegistrySnapshot();
+    const next = buildChatCatalog({
+      registryExtensions: snapshot?.extensions ?? [],
+      nativeExtensions: readNativeExtensions(nativeTools),
+      extensionAPI,
+    });
+    const changed = next.signature !== catalog.signature;
+    if (changed) catalog = next;
+    if (changed || force) {
+      for (const registry of state.registries) installInto(registry);
+      setStatus({});
+    }
+  }
+
+  function fetchNativeTools() {
+    if (nativeRefreshing) return nativeRefreshing;
+    nativeRefreshing = (async () => {
+      try {
+        const tools = await withTimeout(
+          Promise.resolve(getNativeTools()),
+          nativeToolsTimeoutMs,
+          "Reading native extension tools",
+        );
+        nativeCache = { at: Date.now(), tools: Array.isArray(tools) ? tools : [], ready: true };
+        return true;
+      } catch (error) {
+        warnOnce("native extension tools could not be read", error);
+        nativeCache = { at: Date.now(), tools: nativeCache.tools, ready: true };
+        return false;
+      } finally {
+        nativeRefreshing = null;
+      }
+    })();
+    return nativeRefreshing;
+  }
+
+  function revalidateNativeTools() {
+    if (nativeRefreshing) return;
+    void fetchNativeTools().then((ok) => {
+      if (!attached || !ok) return;
+      try {
+        applyCatalog(nativeCache.tools);
+      } catch (error) {
+        warnOnce("updating native extension tools failed", error);
+      }
+    });
+  }
+
   async function readNativeTools(force) {
-    const now = Date.now();
-    if (!force && now - nativeCache.at < NATIVE_TOOLS_TTL_MS) return nativeCache.tools;
-    try {
-      const tools = await withTimeout(Promise.resolve(getNativeTools()), NATIVE_TOOLS_TIMEOUT_MS, "Reading native extension tools");
-      nativeCache = { at: Date.now(), tools: Array.isArray(tools) ? tools : [] };
-    } catch (error) {
-      warnOnce("native extension tools could not be read", error);
-      nativeCache = { at: Date.now(), tools: nativeCache.tools };
+    if (!nativeCache.ready) {
+      await fetchNativeTools();
+      return nativeCache.tools;
+    }
+    if (force || Date.now() - nativeCache.at >= nativeToolsTtlMs) {
+      revalidateNativeTools();
     }
     return nativeCache.tools;
   }
@@ -238,19 +288,8 @@ export function createChatBridge({
   function refresh({ force = false } = {}) {
     if (refreshing) return force ? refreshing.then(() => refresh({ force })) : refreshing;
     refreshing = (async () => {
-      const snapshot = getRegistrySnapshot();
       const native = await readNativeTools(force);
-      const next = buildChatCatalog({
-        registryExtensions: snapshot?.extensions ?? [],
-        nativeExtensions: readNativeExtensions(native),
-        extensionAPI,
-      });
-      const changed = next.signature !== catalog.signature;
-      if (changed) catalog = next;
-      if (changed || force) {
-        for (const registry of state.registries) installInto(registry);
-        setStatus({});
-      }
+      applyCatalog(native, { force });
     })().finally(() => {
       refreshing = null;
     });
@@ -501,9 +540,14 @@ export function createChatBridge({
       .filter((name) => installedNames.has(name));
     if (picks.length === 0) return;
     rememberLoaded(conv, picks);
+    const activeLoaded = [...conv.loaded].filter((name) => {
+      if (!installedNames.has(name)) return false;
+      const entry = catalog.byName.get(name);
+      return Boolean(entry && (entry.readOnly || conv.access !== "read"));
+    });
     await originalConfigure.call(
       conversation,
-      { modelTools: { add: [...conv.loaded].map((name) => ({ name })) } },
+      { modelTools: { add: activeLoaded.map((name) => ({ name })) } },
       context,
     );
     stats.preloads += 1;
