@@ -75,3 +75,10 @@ Hub tool descriptions must tell the agent the order: `list_extensions` or `find_
 - Roam Desktop's debug port is 9223. Never hard-reload the Svy window: the graph is encrypted and locks.
 - Never transact `:harc/*` or `:entity/attrs`. Never rewrite `BT_attr*` blocks.
 - Report what was run and what was not. No "should work".
+
+## Implementation findings & clarifications (2026-11-26)
+
+1. **Registry entries omit top-level `description`/`group` in practice**: Verified live on `Readwisenotes` (`roam-grid`, `better-tasks`, `oblique-strategies` expose `{name, version, tools}` only; 3 extensions, 44 tools total). Tool Hub derives a concise one-line `summary` from tool descriptions when `ext.description` is missing, and defaults `group` to `"Other"` when `ext.group` is missing.
+2. **Roam settings key restrictions**: Verified in `roam-depot-extension-api.md` that `extensionAPI.settings.panel.create` rejects setting IDs containing `.`, `#`, `$`, `[`, or `]`. Tool Hub losslessly encodes extension keys (`~<hex>`) before forming `ext:<key>:enabled` and `ext:<key>:write` IDs.
+3. **Read-only guard**: A tool is treated as read-only only when `tool.readOnly === true && tool.isMutating !== true`. On `Readwisenotes`, `oblique-strategies/os_random_strategy` omits `readOnly`, so it is treated as writing by default per the spec rule.
+4. **Guidelines index default**: `guidelines-index-enabled` defaults to `false` (opt-in) so loading Tool Hub on any graph—including Svy—never writes to `roam/agent guidelines` until explicitly enabled in Settings. On `Readwisenotes`, `roam/agent guidelines` already exists (`uid: 2Xe52ygsw`) with a user block (`BtzKCfUjA`); Tool Hub only touches its own stored block UID.
