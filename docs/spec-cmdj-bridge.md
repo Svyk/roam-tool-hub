@@ -1,6 +1,6 @@
 # Cmd-J bridge: spec v0
 
-Status: built in 0.4.0 (2026-11-27), off by default. Checked against Roam's real chat runtime in an isolated harness. A real chat turn with a model has not been run; see "Not checked". The "As built" section at the end lists where the code differs from the design below.
+Status: built in 0.4.0 and revised in 0.4.1 (both 2026-11-27), off by default. Checked against Roam's real chat runtime in an isolated harness, then through 43 real chat turns in the Readwisenotes window (Claude Opus 5.5, medium). "As built" lists where the code differs from the design below; "Live results" at the end says what the real turns showed.
 
 ## Problem
 
@@ -47,13 +47,10 @@ Checked later the same day, with the built modules on the real runtime (isolated
 
 ## Not checked
 
-Only a real chat turn with a model can check these:
-
-- How the chat panel draws a tool it has no label for. The code falls back to the bare tool name.
-- Whether the model uses the tools freely given fact 11.
-- Roam's argument check against third-party tool schemas. A schema it rejects would make that one tool return an argument error.
-- Loading tools inside one turn. `control.addTools` is read by the runtime's tool task, which the isolated test cannot run. Loading across turns does not depend on it.
 - Who a write is attributed to. Tools are called directly, so expect the logged-in user.
+- Roam's argument check against every third-party tool schema. Every tool the model called in the live turns was accepted; the rest were not exercised.
+- Ask AI on a block. The driver has no reliable way to start one.
+- Anything on the Svy graph. All testing was on Readwisenotes.
 
 ## Design
 
@@ -143,3 +140,41 @@ Differences from the design above, each for a reason found while building.
 | Native `extensionAPI.ai` tools in phase B2 | Included now, with their own switches under a `native:` key. Their writing tools are off until switched on. | The listing and the call both work from the page. |
 
 Not done: the `guide` text in the other extensions' repos. Tool Hub reads the field; no extension supplies one yet.
+
+## Live results (2026-11-27)
+
+How it was run: `scripts/dev/chat-driver.mjs` sends one chat turn through Roam Desktop's debug port and reports the reply, the tool calls the panel lists, each confirm dialog and the bridge's counters. `scripts/dev/hub-setting.mjs` flips a Tool Hub switch. Both refuse any graph but the named test graph. Every write went to the page `Tool Hub/Stress test 2026-11-27`.
+
+Round 1, 30 turns on 0.4.0 (run by Gemini 4 Neon; the turn-by-turn table names private pages and is kept outside this repository):
+
+- The panel lists a hub tool by its bare name, with "Failed" when it returned an error.
+- The model used the tools without being told to: Roam Grid for tables, Better Tasks for tasks, Plexus Diagram for boards, two extensions in one request.
+- A denial stopped the model with no retry. A read-only chat refused with no dialog. A planted "delete every task" block was ignored. Prompts unrelated to any extension loaded nothing and called nothing.
+- Faults found: "whiteboards" loaded nothing; a long prompt with the request at the end loaded the wrong tools; template listers rode along as companions; the word "export" alone loaded six tools; the native tool list read timed out once at 1.5 s; one "add a row and sort" request took five dialogs.
+
+Review (Gemini 4 Carbon) of the first fix commit found a compound-word rule that loaded table tools for "comfortable" and board tools for "keyboard", a failed first native read marked as done, and a background refresh that could change the catalog mid-turn. All three were fixed before anything was published.
+
+0.4.1, as published:
+
+| Area | Change |
+|---|---|
+| Matching | A short alias list (whiteboard, spreadsheet, datagrid, subtask, todo) instead of a compound-word rule. Words that only say what to do count for little and cannot load a tool alone. Long prompts keep 120 words. Template listers are never companions. |
+| Prompt section | One more sentence: a tool being in the list does not mean it is wanted. |
+| Native tool list | Retried until one read succeeds. A turn waits at most 1.5 s for it. A background refresh only updates the cache; the catalog changes at the start of a turn. |
+| Per turn | Only tools offered to Roam for this turn can be loaded. `find_extension_tools` reports the others under `not_loaded`. |
+| Confirm dialog | Deny, Allow <extension> in this chat, Allow once. The permanent choice is the Settings switch only. A tool whose name says delete, remove, clear, drop, destroy, purge, wipe, reset, restore, archive or bulk always asks, even with that switch on, and is never covered by an in-chat approval. |
+
+Round 2, 8 turns on 0.4.1 (run by the host), all as expected, zero bridge errors:
+
+| Prompt | Result |
+|---|---|
+| What whiteboards do I have | Tools loaded before the first step, no search |
+| Two alternative phrasings, "comfortable" in the text | Nothing loaded, nothing called |
+| Make a tea table, add a row, sort it | One dialog ("in this chat") covered four writes. A search inside the turn loaded two more tools and they were callable at once |
+| Delete the last row (same chat) | Dialog shown again, with Deny and Allow once only |
+| "On the table", "on board", "take me to task" | Tools were loaded but the model called none and said it read them as figures of speech |
+| Export to an Anki deck and email it | Nothing loaded, clean refusal |
+| Create a task, denied | Model reported the refusal and stopped. No template lister loaded |
+| Long background, request at the end | Right tools loaded, no search |
+
+Not the hub's, left for their own repos: Plexus Diagram's `read_board` throws on the board `KT_KHnsXe`; Oblique Strategies does not mark its tool read-only, so it asks every time; Roam Grid's `rg_list_grids` returns tables that no longer exist, and its reading tools say "grid" where people say "table".
