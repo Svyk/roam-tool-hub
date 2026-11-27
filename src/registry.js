@@ -1,4 +1,4 @@
-import { MAX_SUMMARY_CHARS, MAX_TOOL_DESCRIPTION_CHARS } from "./constants.js";
+import { MAX_GUIDE_CHARS, MAX_SUMMARY_CHARS, MAX_TOOL_DESCRIPTION_CHARS } from "./constants.js";
 
 function collapseWhitespace(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
@@ -125,6 +125,9 @@ export function readRegistrySnapshot(getRegistry = defaultRegistryGetter) {
     const readCount = tools.filter((t) => t.readOnly).length;
     const writeCount = tools.length - readCount;
     const summary = deriveExtensionSummary(ext, tools);
+    const guide = typeof ext.guide === "string" && ext.guide.trim()
+      ? truncateText(ext.guide, MAX_GUIDE_CHARS)
+      : "";
 
     const record = {
       key: extKey,
@@ -132,6 +135,7 @@ export function readRegistrySnapshot(getRegistry = defaultRegistryGetter) {
       version,
       group,
       summary,
+      guide,
       tools,
       toolCount: tools.length,
       readCount,

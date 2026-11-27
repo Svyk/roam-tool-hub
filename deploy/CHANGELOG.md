@@ -4,6 +4,17 @@ All notable changes to this project follow [Keep a Changelog](https://keepachang
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-27
+
+### Added
+
+- Built-in chat bridge for Roam's own AI chat (Cmd-J and Ask AI on a block). It is experimental and off by default. It relies on `window.PiHarness`, which Roam does not document, so it checks the runtime first and turns itself off if Roam changes it. Turn it on with **Built-in chat bridge (experimental)** in Settings.
+- `find_extension_tools`, one always-visible chat tool that loads other extensions' tools into the chat by name, by a few words, or by extension. Their schemas stay out of the chat until they are loaded.
+- Automatic loading: before each chat turn, the tools that clearly match your message are put in front of the model. Switch it off with **Chat: load matching tools automatically**. For Ask AI on a block, only the block's own text is used for matching.
+- A confirm dialog before the chat runs any tool that changes the graph, with Deny, Always allow and Allow once. Each extension has a **chat may change the graph without asking** switch, off by default. A read-only chat never gets a writing tool.
+- Native AI tools from other extensions (`extensionAPI.ai.addTool`) are offered to the built-in chat, with their own switches. Those switches apply to the chat bridge only.
+- Optional `guide` field on a `window.RoamExtensionTools` entry (up to 900 characters). The chat gets it with the first tool it loads from that extension. `list_extensions` and `find_tools` return it too.
+
 ## [0.3.0] - 2026-11-26
 
 ### Removed

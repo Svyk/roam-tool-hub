@@ -238,6 +238,7 @@ export function createHubTools({
           summary: ext.summary,
         };
         if (ext.version) row.version = ext.version;
+        if (ext.guide) row.guide = ext.guide;
         return row;
       });
       return {
@@ -300,11 +301,18 @@ export function createHubTools({
       }
 
       const slice = matched.slice(0, limit);
-      return {
+      const response = {
         tools: slice,
         totalMatched: matched.length,
         truncated: matched.length > slice.length,
       };
+      const guides = {};
+      for (const row of slice) {
+        const ext = enabled.find((candidate) => candidate.key === row.extension);
+        if (ext?.guide) guides[ext.key] = ext.guide;
+      }
+      if (Object.keys(guides).length > 0) response.guides = guides;
+      return response;
     },
   };
 

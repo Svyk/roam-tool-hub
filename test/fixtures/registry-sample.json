@@ -1,0 +1,500 @@
+{
+ "roam-grid": {
+  "name": "Roam Grid",
+  "version": "0.18.7",
+  "keys": [
+   "name",
+   "version",
+   "tools"
+  ],
+  "tools": [
+   {
+    "name": "rg_list_grids",
+    "readOnly": true,
+    "description": "List every enhanced grid (native and large) with uid, mode, rows, cols.",
+    "params": []
+   },
+   {
+    "name": "rg_get_grid",
+    "readOnly": true,
+    "description": "Return the JSON model of an enhanced grid by uid.",
+    "params": [
+     "uid"
+    ]
+   },
+   {
+    "name": "rg_enhance_table",
+    "description": "Enhance a native {{table}} block by uid without focusing it.",
+    "params": [
+     "uid"
+    ]
+   },
+   {
+    "name": "rg_restore_native",
+    "description": "Restore an enhanced native grid to a plain Roam table by uid.",
+    "params": [
+     "uid"
+    ]
+   },
+   {
+    "name": "rg_create_table",
+    "description": "Create a new native grid. Requires parent_uid or after_uid so it never depends on focus.",
+    "params": [
+     "parent_uid",
+     "after_uid",
+     "rows",
+     "cols"
+    ]
+   },
+   {
+    "name": "rg_set_cell",
+    "description": "Set a cell value via the v1 patch surface (row/col 0-indexed). Formulas begin with `=` but not `==`.",
+    "params": [
+     "uid",
+     "row",
+     "col",
+     "value"
+    ]
+   },
+   {
+    "name": "rg_add_formula",
+    "description": "Set a formula cell. A leading `=` is added if missing; `==` is refused.",
+    "params": [
+     "uid",
+     "row",
+     "col",
+     "formula"
+    ]
+   },
+   {
+    "name": "rg_apply_patch",
+    "description": "Apply one or more v1 grid patches (object or array) by uid.",
+    "params": [
+     "uid",
+     "patch"
+    ]
+   },
+   {
+    "name": "rg_resize_table",
+    "description": "Resize a native grid by uid. rows/cols clamped to 1-20.",
+    "params": [
+     "uid",
+     "rows",
+     "cols"
+    ]
+   },
+   {
+    "name": "rg_list_templates",
+    "readOnly": true,
+    "description": "List saved grid template names (registry and store).",
+    "params": []
+   },
+   {
+    "name": "rg_create_from_template",
+    "description": "Insert a grid from a saved template. parent_uid is required so it never depends on focus.",
+    "params": [
+     "name",
+     "parent_uid"
+    ]
+   },
+   {
+    "name": "rg_insert_rows",
+    "description": "Insert rows into an enhanced grid by uid. Default count 1.",
+    "params": [
+     "uid",
+     "index",
+     "count"
+    ]
+   },
+   {
+    "name": "rg_insert_cols",
+    "description": "Insert columns into an enhanced grid by uid. Default count 1.",
+    "params": [
+     "uid",
+     "index",
+     "count"
+    ]
+   },
+   {
+    "name": "rg_delete_rows",
+    "description": "Delete rows from an enhanced grid by uid. Default count 1. Refuses to delete the last row.",
+    "params": [
+     "uid",
+     "index",
+     "count"
+    ]
+   },
+   {
+    "name": "rg_delete_cols",
+    "description": "Delete columns from an enhanced grid by uid. Default count 1. Refuses to delete the last column.",
+    "params": [
+     "uid",
+     "index",
+     "count"
+    ]
+   },
+   {
+    "name": "rg_get_cell",
+    "readOnly": true,
+    "description": "Return { raw, value } for a cell. value evaluates formulas via FormulaEngine.",
+    "params": [
+     "uid",
+     "row",
+     "col"
+    ]
+   },
+   {
+    "name": "rg_fill",
+    "description": "Fill a rectangular region starting at (start_row, start_col) with values (array of arrays of strings).",
+    "params": [
+     "uid",
+     "start_row",
+     "start_col",
+     "values"
+    ]
+   },
+   {
+    "name": "rg_merge",
+    "description": "Merge a range of cells. Refuses a single cell and nonempty covered cells.",
+    "params": [
+     "uid",
+     "start_row",
+     "start_col",
+     "end_row",
+     "end_col"
+    ]
+   },
+   {
+    "name": "rg_unmerge",
+    "description": "Unmerge the merge region containing (row, col).",
+    "params": [
+     "uid",
+     "row",
+     "col"
+    ]
+   },
+   {
+    "name": "rg_sort",
+    "description": "Sort rows by a column. direction must be \"asc\" or \"desc\". Header rows (frozenRows) stay put.",
+    "params": [
+     "uid",
+     "col",
+     "direction"
+    ]
+   },
+   {
+    "name": "rg_export_grid",
+    "readOnly": true,
+    "description": "Export an enhanced grid as text. format one of csv|tsv|markdown|json. No file download.",
+    "params": [
+     "uid",
+     "format"
+    ]
+   },
+   {
+    "name": "rg_insert_chart",
+    "description": "Insert a chart spec onto the model. type one of line|column|bar|scatter. No UI picker.",
+    "params": [
+     "uid",
+     "type",
+     "start_row",
+     "start_col",
+     "end_row",
+     "end_col",
+     "title"
+    ]
+   },
+   {
+    "name": "rg_create_table_from_rows",
+    "description": "Create a native {{table}} from cell text, with merges, header rows, alignment, and widths. One write when every cell round-trips. Requires parent_uid or after_uid.",
+    "params": [
+     "parent_uid",
+     "after_uid",
+     "order",
+     "rows",
+     "merges",
+     "header_rows",
+     "alignments",
+     "column_alignments",
+     "widths",
+     "enhance"
+    ]
+   },
+   {
+    "name": "rg_apply_layout",
+    "description": "Set merges, header rows, frozen rows, alignment, and widths on an existing native {{table}} by uid, enhancing it first if needed. Omitted fields keep their current layout.",
+    "params": [
+     "uid",
+     "merges",
+     "header_rows",
+     "frozen_rows",
+     "alignments",
+     "column_alignments",
+     "widths",
+     "fit_to_width"
+    ]
+   }
+  ]
+ },
+ "better-tasks": {
+  "name": "Better Tasks",
+  "version": "1.3",
+  "keys": [
+   "name",
+   "version",
+   "tools"
+  ],
+  "tools": [
+   {
+    "name": "bt_get_projects",
+    "readOnly": true,
+    "description": "List projects tracked by Better Tasks.",
+    "params": [
+     "status",
+     "include_tasks",
+     "query",
+     "max_results"
+    ]
+   },
+   {
+    "name": "bt_get_waiting_for",
+    "readOnly": true,
+    "description": "List waiting-for values tracked by Better Tasks.",
+    "params": [
+     "status",
+     "include_counts",
+     "query",
+     "max_results"
+    ]
+   },
+   {
+    "name": "bt_get_context",
+    "readOnly": true,
+    "description": "List context values tracked by Better Tasks.",
+    "params": [
+     "status",
+     "include_counts",
+     "query",
+     "max_results"
+    ]
+   },
+   {
+    "name": "bt_get_attributes",
+    "readOnly": true,
+    "description": "Get Better Tasks attribute schema and configured labels.",
+    "params": []
+   },
+   {
+    "name": "bt_search",
+    "readOnly": true,
+    "description": "Search Better Tasks tasks by status, due, project, assignee, or free text.",
+    "params": [
+     "status",
+     "query",
+     "due",
+     "completed",
+     "project",
+     "assignee",
+     "max_results"
+    ]
+   },
+   {
+    "name": "bt_create",
+    "readOnly": false,
+    "description": "Create a new Better Tasks task. Use attributes object for repeat, start, defer, due, completed, project, gtd, waitingFor, context, priority, energy, depends, parent. Top-level attribute keys also accepted.",
+    "params": [
+     "text",
+     "status",
+     "parent_uid",
+     "attributes"
+    ]
+   },
+   {
+    "name": "bt_modify",
+    "readOnly": false,
+    "description": "Modify an existing Better Tasks task. Use attributes object for repeat, start, defer, due, completed, project, gtd, waitingFor, context, priority, energy, depends, parent. Top-level attribute keys also accepted.",
+    "params": [
+     "uid",
+     "text",
+     "status",
+     "attributes"
+    ]
+   },
+   {
+    "name": "bt_bulk_modify",
+    "readOnly": false,
+    "description": "Modify multiple tasks in a single operation. Each item supports text, status, and attributes. Top-level attribute keys also accepted per item.",
+    "params": [
+     "tasks"
+    ]
+   },
+   {
+    "name": "bt_bulk_snooze",
+    "readOnly": false,
+    "description": "Snooze multiple tasks by shifting existing defer/start/due dates forward by a number of days.",
+    "params": [
+     "uids",
+     "days"
+    ]
+   },
+   {
+    "name": "bt_delete",
+    "readOnly": false,
+    "description": "Permanently delete a Better Tasks task block AND its entire subtree (child blocks, structural subtasks, activity history). References from other tasks' depends/parent attributes are cleaned first; explicit subtasks elsewhere lose their parent link. The user is",
+    "params": [
+     "uid",
+     "confirm"
+    ]
+   },
+   {
+    "name": "bt_bulk_delete",
+    "readOnly": false,
+    "description": "Permanently delete multiple Better Tasks task blocks and their entire subtrees. References from other tasks' depends/parent attributes are cleaned first. Requires confirm: true.",
+    "params": [
+     "uids",
+     "confirm"
+    ]
+   },
+   {
+    "name": "bt_get_analytics",
+    "readOnly": true,
+    "description": "Task analytics: overdue count, completion rate, velocity by project and time period.",
+    "params": [
+     "period",
+     "project"
+    ]
+   },
+   {
+    "name": "bt_get_task_by_uid",
+    "readOnly": true,
+    "description": "Fetch a single task by its block UID. Returns full task details including attributes.",
+    "params": [
+     "uid"
+    ]
+   },
+   {
+    "name": "bt_get_analytics_detailed",
+    "readOnly": true,
+    "description": "Detailed task analytics: summary, completion over time, time to completion distribution, overdue frequency, project breakdown, recurring adherence, and busiest-days heatmap.",
+    "params": [
+     "period"
+    ]
+   },
+   {
+    "name": "bt_get_suggestions",
+    "readOnly": true,
+    "description": "Advisory task suggestions from local heuristics: snooze counts, weekday completion patterns, weekly load balancing, stalled tasks, and recurring adherence. Read-only — never applies changes.",
+    "params": [
+     "include_dismissed",
+     "max_results"
+    ]
+   },
+   {
+    "name": "bt_export",
+    "readOnly": true,
+    "description": "Export tasks as JSON, CSV, or ICS. Returns the data (does not trigger browser download).",
+    "params": [
+     "format",
+     "status",
+     "project"
+    ]
+   },
+   {
+    "name": "bt_list_templates",
+    "readOnly": true,
+    "description": "List saved task templates.",
+    "params": []
+   },
+   {
+    "name": "bt_create_from_template",
+    "readOnly": false,
+    "description": "Create a new task from a saved template. Resolves parameters and creates the task with subtasks.",
+    "params": [
+     "template_id",
+     "parameters",
+     "parent_uid"
+    ]
+   },
+   {
+    "name": "bt_manage_templates",
+    "readOnly": false,
+    "description": "Manage task templates: create, update, delete, or duplicate.",
+    "params": [
+     "action",
+     "template_id",
+     "template"
+    ]
+   }
+  ]
+ },
+ "oblique-strategies": {
+  "name": "Oblique Strategies",
+  "version": "1.0",
+  "keys": [
+   "name",
+   "version",
+   "tools"
+  ],
+  "tools": [
+   {
+    "name": "os_random_strategy",
+    "description": "Return a random Oblique Strategy — a lateral-thinking prompt from Brian Eno and Peter Schmidt's card deck.",
+    "params": [
+     "edition"
+    ]
+   }
+  ]
+ },
+ "roam-compass": {
+  "name": "Compass",
+  "version": "DEV",
+  "keys": [
+   "name",
+   "version",
+   "description",
+   "group",
+   "tools"
+  ],
+  "tools": [
+   {
+    "name": "compass_get_neighborhood",
+    "readOnly": true,
+    "description": "Return Compass's structured directional neighborhood around a page or block uid (or page_title).",
+    "params": [
+     "uid",
+     "page_title"
+    ]
+   }
+  ]
+ },
+ "roam-plexus": {
+  "name": "Plexus",
+  "version": "DEV",
+  "keys": [
+   "name",
+   "version",
+   "description",
+   "group",
+   "tools"
+  ],
+  "tools": [
+   {
+    "name": "px_list_regions",
+    "readOnly": true,
+    "description": "List Plexus Excalidraw region blocks across the graph, or for one drawing_uid.",
+    "params": [
+     "drawing_uid",
+     "limit"
+    ]
+   },
+   {
+    "name": "px_get_region",
+    "readOnly": true,
+    "description": "Return parsed metadata, caption, drawing reference, and referencing backlink uids for one Plexus region block.",
+    "params": [
+     "uid"
+    ]
+   }
+  ]
+ }
+}

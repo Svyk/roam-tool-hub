@@ -3,3 +3,27 @@
 .rth-hidden {
   display: none;
 }
+
+.rth-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 22, 26, 0.7);
+}
+
+.rth-confirm {
+  max-width: 560px;
+  width: calc(100% - 32px);
+  margin: 0;
+}
+
+.rth-confirm pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}

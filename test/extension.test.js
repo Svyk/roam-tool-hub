@@ -98,3 +98,33 @@ test("onunload preserves the guidelines index block and stored uid", async () =>
 
   assert.equal(api.settings.get("guidelines-block-uid"), "owned-block-1");
 });
+
+test("the chat bridge setting seeds off, and loading with no window leaves the bridge detached", async () => {
+  const api = fakeExtensionApi();
+  const cleanup = await extension.onload({ extensionAPI: api, extension: { version: "0.4.0-test" } });
+  assert.equal(api.settings.get("chat-bridge-enabled"), false);
+  assert.equal(api.settings.get("chat-auto-load"), true);
+  const [, , ids] = api.calls.filter(([name]) => name === "panel:create").at(-1);
+  assert.ok(ids.includes("chat-bridge-enabled"));
+  assert.ok(ids.includes("chat-auto-load"));
+  await cleanup();
+});
+
+test("switching the bridge on without a Roam runtime waits quietly and unload turns it off", async () => {
+  const api = fakeExtensionApi();
+  await api.settings.set("chat-bridge-enabled", true);
+  const priorWindow = globalThis.window;
+  const win = {};
+  globalThis.window = win;
+  try {
+    const cleanup = await extension.onload({ extensionAPI: api, extension: { version: "0.4.0-test" } });
+    assert.equal(win.__roamToolHubChatBridge.status.phase, "waiting");
+    assert.ok(Object.getOwnPropertyDescriptor(win, "PiHarness").set);
+    await cleanup();
+    assert.equal(win.__roamToolHubChatBridge.status.phase, "off");
+    assert.equal("PiHarness" in win, false);
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});

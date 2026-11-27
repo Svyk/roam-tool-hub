@@ -1,6 +1,6 @@
 # Tool Hub
 
-A zero-runtime-dependency Roam Depot extension that exposes every tool registered on `window.RoamExtensionTools` to Roam's local AI surfaces (local MCP, CLI, Local API, and Roam's built-in chat once Roam enables `call_extension_tool` in `app-agent.js`) through five small native AI tools—without loading dozens of tool schemas into every session.
+A zero-runtime-dependency Roam Depot extension that exposes every tool registered on `window.RoamExtensionTools` to Roam's local AI surfaces (local MCP, CLI, Local API, and Roam's built-in chat through the experimental chat bridge below) through five small native AI tools—without loading dozens of tool schemas into every session.
 
 ## Registered AI tools
 
@@ -25,7 +25,34 @@ Agents discover tools in order: `list_extensions` or `find_tools` → `describe_
 - **Write attribution limit**: Tool Hub invokes registry tools via `context.asTokenUser(() => tool.execute(args, context))` and awaits the returned value outside `asTokenUser`. Per Roam's `extensionAPI.ai` contract, synchronous writes issued before the tool's first `await` are attributed to the AI user; writes made after a tool's first `await` are attributed to the logged-in user unless the target tool uses the passed `context.tokenUserUid` (`user-uid`). This is a known limit of the `window.RoamExtensionTools` convention.
 - **Zero typing overhead**: Tool Hub registers no `keydown` listeners, no polling timers, and at most one command palette entry (`Tool Hub: Refresh registry & settings`). The registry is re-read on demand when a tool or refresh runs.
 - **Optional guidelines index**: Enable **Publish index on roam/agent guidelines** in Settings to maintain one generated summary block on `[[roam/agent guidelines]]` (upserted by stored block UID, written only when text changes, never touching other blocks). The heading explicitly scopes it to Local MCP (`call_extension_tool`) clients so Roam's built-in `Cmd-J` chat ignores it and writes normal Roam blocks/tables directly. Above 20 enabled extensions, it writes grouped counts and points to `list_extensions`. Turning the setting off deletes that block; unloading the extension leaves it intact so reloads do not churn the page. Default is OFF so graphs are not modified until opted in.
-- **Built-in `Cmd-J` chat limitation**: Roam's built-in `Cmd-J` agent (`app-agent.js`) omits `call_extension_tool` from its tool allowlist and its system prompt explicitly prohibits driving plugins or broadening tool policy from graph text. Use Tool Hub through Roam's Local MCP server (Claude Code, T3 Code, Cursor, Codex, etc.) until Roam enables `call_extension_tool` in built-in chat.
+
+## Built-in chat bridge (experimental)
+
+Roam's built-in chat (Cmd-J, Ask AI on a block) cannot call extension tools on its own. The bridge adds them. It installs Tool Hub as a second extension in the chat's own runtime, `window.PiHarness`. The chat then sees one small tool, `find_extension_tools`, and loads other tools through it when a request needs them.
+
+To turn it on, open Settings, then the Tool Hub tab, and switch on **Built-in chat bridge (experimental)**. The line under the switch shows the state:
+
+- `On. Roam's assistant has not loaded in this window yet; open the AI chat once.` The bridge is waiting for Roam's chat to start.
+- `On. Attaches at the next chat turn.` The bridge is ready. Send one chat message.
+- `On and attached: N tools from M extensions.` It works. `Confirmed in a chat turn.` is added once a real turn has used it.
+
+**Chat: load matching tools automatically** puts the tools that match your message in front of the model before it asks. It is on by default.
+
+Reading tools run when the chat calls them. A tool that changes the graph first opens a dialog with its name and arguments. Choose **Deny**, **Allow once**, or **Always allow** for that extension. The dialog has no default button, so a stray Enter does not approve anything. A chat that cannot edit the graph never gets writing tools. Each extension also has a **chat may change the graph without asking** switch. It is off by default. Turn it on only for extensions you trust.
+
+The bridge uses a part of Roam that is not documented. It checks the runtime before it changes anything. If Roam changes that runtime, the bridge turns itself off, the setting line says why, and the chat works as before. Remove the bridge once Roam lets extension tools into the built-in chat.
+
+### Guide field
+
+An entry in `window.RoamExtensionTools` may carry a `guide` string of up to 900 characters. Use it for what a model cannot read from the tool schemas: how the extension stores its data, which tool to reach for first, and what not to write by hand. The chat gets the guide with the first tool it loads from that extension. `list_extensions` and `find_tools` return it as well.
+
+```js
+window.RoamExtensionTools["my-ext"] = {
+  name: "My Extension",
+  guide: "Tables live in blocks tagged {{table}}. Call my_list first. Never edit the block text by hand.",
+  tools: [/* ... */],
+};
+```
 
 ## Commands
 

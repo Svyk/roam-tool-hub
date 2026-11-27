@@ -1,14 +1,23 @@
 import { HUB_VERSION, LOG_PREFIX, RUNTIME_VERSION_KEY, SETTING_IDS } from "./constants.js";
+import { createChatBridge } from "./chat-bridge.js";
+import { readNativeExtensions } from "./chat-catalog.js";
+import { createChatConfirm } from "./chat-confirm.js";
 import { removeGuidelinesIndex, syncGuidelinesIndex } from "./guidelines-index.js";
 import { createHubTools, registerHubTools } from "./hub-tools.js";
 import { createLifecycle } from "./lifecycle.js";
 import { defaultRegistryGetter, readRegistrySnapshot } from "./registry.js";
 import {
   createSettingsPanel,
+  describeChatBridgeStatus,
+  extensionChatAutoSettingId,
   extensionEnabledSettingId,
   extensionWriteSettingId,
+  isChatAutoApproved,
+  isChatAutoLoadEnabled,
+  isChatBridgeEnabled,
   isGuidelinesIndexEnabled,
   seedExtensionDefaults,
+  setChatAutoApproved,
 } from "./settings.js";
 
 let activeLifecycle = null;
@@ -27,6 +36,7 @@ function snapshotSignature(snapshot) {
       ext.version || "",
       ext.group || "",
       ext.summary,
+      ext.guide || "",
       ext.toolCount,
       ext.readCount,
       ext.writeCount,
@@ -43,6 +53,32 @@ function setRuntimeVersion(version, lifecycle) {
       delete globalThis.window[RUNTIME_VERSION_KEY];
     }
   });
+}
+
+function roamAi() {
+  return globalThis.window?.roamAlphaAPI?.data?.ai;
+}
+
+async function getNativeTools() {
+  try {
+    const guidelines = await roamAi()?.getGraphGuidelines?.();
+    return Array.isArray(guidelines?.extensionTools) ? guidelines.extensionTools : [];
+  } catch {
+    return [];
+  }
+}
+
+function readBlockText(uid) {
+  try {
+    const pull = globalThis.window?.roamAlphaAPI?.pull;
+    if (typeof pull !== "function") return "";
+    const block = pull("[:block/string {:block/children [:block/string]}]", [":block/uid", uid]);
+    if (!block) return "";
+    const lines = [block[":block/string"], ...(block[":block/children"] ?? []).map((child) => child?.[":block/string"])];
+    return lines.filter((line) => typeof line === "string" && line).join("\n");
+  } catch {
+    return "";
+  }
 }
 
 export async function onload({ extensionAPI, extension } = {}) {
@@ -109,11 +145,29 @@ export async function onload({ extensionAPI, extension } = {}) {
       if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
       const settingId = field === "write"
         ? extensionWriteSettingId(extKey)
-        : extensionEnabledSettingId(extKey);
+        : field === "chatAuto"
+          ? extensionChatAutoSettingId(extKey)
+          : extensionEnabledSettingId(extKey);
       await extensionAPI.settings.set(settingId, checked);
-      if (isGuidelinesIndexEnabled(extensionAPI)) {
+      if (field !== "chatAuto" && isGuidelinesIndexEnabled(extensionAPI)) {
         await scheduleGuidelinesReconcile({ allowShrink: true });
       }
+      await bridge.refresh().catch((error) => {
+        console.warn(`${LOG_PREFIX} Chat bridge refresh failed`, error);
+      });
+    };
+
+    const handleToggleChatBridge = async (checked) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
+      await extensionAPI.settings.set(SETTING_IDS.chatBridgeEnabled, checked);
+      if (checked) bridge.attach();
+      else bridge.detach();
+      await refreshSettingsPanel();
+    };
+
+    const handleToggleChatAutoLoad = async (checked) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
+      await extensionAPI.settings.set(SETTING_IDS.chatAutoLoad, checked);
     };
 
     const refreshSettingsPanel = async ({ syncGuidelines = false, allowShrink = true } = {}) => {
@@ -128,16 +182,26 @@ export async function onload({ extensionAPI, extension } = {}) {
         do {
           panelDirty = false;
           const snapshot = readRegistrySnapshot(defaultRegistryGetter);
-          await seedExtensionDefaults(extensionAPI, snapshot.extensions);
+          let nativeExtensions = [];
+          try {
+            nativeExtensions = readNativeExtensions(await getNativeTools());
+          } catch {
+            nativeExtensions = [];
+          }
+          await seedExtensionDefaults(extensionAPI, [...snapshot.extensions, ...nativeExtensions]);
           if (lifecycle.disposed) return;
           lastSignature = snapshotSignature(snapshot);
           await lifecycle.settingsPanel(
             extensionAPI,
             createSettingsPanel({
               extensions: snapshot.extensions,
+              nativeExtensions,
+              chatStatus: bridge.status(),
               onRefresh: () => refreshSettingsPanel({ syncGuidelines: true, allowShrink: true }),
               onToggleExtension: handleToggleExtension,
               onToggleGuidelines: handleToggleGuidelines,
+              onToggleChatBridge: handleToggleChatBridge,
+              onToggleChatAutoLoad: handleToggleChatAutoLoad,
             }),
           );
         } while (panelDirty && !lifecycle.disposed);
@@ -166,8 +230,38 @@ export async function onload({ extensionAPI, extension } = {}) {
       onSnapshot,
     });
 
+    const runTool = tools.find((tool) => tool.name === "run_tool");
+    const confirm = createChatConfirm();
+    let lastStatusText = describeChatBridgeStatus({ phase: "off" });
+    const bridge = createChatBridge({
+      extensionAPI,
+      getRegistrySnapshot: () => readRegistrySnapshot(defaultRegistryGetter),
+      getNativeTools,
+      callNativeTool: (id, args) => roamAi().callExtensionTool({ tool: id, args }),
+      runRegistryTool: (id, args) => runTool.handler({ tool: id, args }, {}),
+      confirmWrite: (request) => confirm.confirm(request),
+      isAutoLoadEnabled: () => isChatAutoLoadEnabled(extensionAPI),
+      isChatAutoApproved: (extKey) => isChatAutoApproved(extensionAPI, extKey),
+      setChatAutoApproved: (extKey, value) => setChatAutoApproved(extensionAPI, extKey, value),
+      readBlockText,
+      onStatus: (status) => {
+        const text = describeChatBridgeStatus(status);
+        if (text === lastStatusText || lifecycle.disposed) return;
+        lastStatusText = text;
+        void refreshSettingsPanel().catch((error) => {
+          console.warn(`${LOG_PREFIX} Settings panel refresh failed`, error);
+        });
+      },
+    });
+    lifecycle.add(() => {
+      bridge.detach();
+      confirm.dispose();
+    });
+
     await refreshSettingsPanel({ syncGuidelines: true, allowShrink: false });
     if (lifecycle.disposed) return async () => {};
+
+    if (isChatBridgeEnabled(extensionAPI)) bridge.attach();
 
     const unregisterTools = registerHubTools(extensionAPI, tools);
     lifecycle.add(unregisterTools);
@@ -177,6 +271,9 @@ export async function onload({ extensionAPI, extension } = {}) {
         label: "Tool Hub: Refresh registry & settings",
         callback: () => {
           void refreshSettingsPanel({ syncGuidelines: true, allowShrink: true });
+          void bridge.refresh().catch((error) => {
+            console.warn(`${LOG_PREFIX} Chat bridge refresh failed`, error);
+          });
         },
       });
       if (lifecycle.disposed) return async () => {};

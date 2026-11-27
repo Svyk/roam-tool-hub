@@ -354,3 +354,25 @@ test("preserves tool this-binding, rejects slash tool names, avoids surrogate sp
   assert.throws(() => registerHubTools(failingApi, Object.values(map)), /boom/);
   assert.equal(removed.length, 2);
 });
+
+test("list_extensions and find_tools carry an extension's guide only when it has one", () => {
+  const api = makeFakeExtensionAPI();
+  const { registry } = makeFakeRegistry();
+  registry["roam-grid"].guide = "Grids are tables. Use rg_set_cell for one cell.";
+  const map = toolsByName(createHubTools({ extensionAPI: api, getRegistry: () => registry }));
+
+  const rows = map.list_extensions.handler().extensions;
+  const grid = rows.find((row) => row.key === "roam-grid");
+  const tasks = rows.find((row) => row.key === "better-tasks");
+  assert.equal(grid.guide, "Grids are tables. Use rg_set_cell for one cell.");
+  assert.equal("guide" in tasks, false);
+
+  const found = map.find_tools.handler({ extension: "grid" });
+  assert.deepEqual(found.guides, { "roam-grid": "Grids are tables. Use rg_set_cell for one cell." });
+
+  const none = map.find_tools.handler({ extension: "better-tasks" });
+  assert.equal("guides" in none, false);
+
+  const sliced = map.find_tools.handler({ limit: 1, extension: "better-tasks" });
+  assert.equal("guides" in sliced, false);
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MAX_TOOL_DESCRIPTION_CHARS } from "../src/constants.js";
+import { MAX_GUIDE_CHARS, MAX_TOOL_DESCRIPTION_CHARS } from "../src/constants.js";
 import { isToolReadOnly, readRegistrySnapshot, truncateText } from "../src/registry.js";
 
 test("isToolReadOnly treats only readOnly: true (without isMutating: true) as read-only", () => {
@@ -62,4 +62,25 @@ test("readRegistrySnapshot normalizes entries, skips malformed tools, deduplicat
   assert.equal(zRead.shortDescription.endsWith("…"), true);
 
   assert.equal(truncateText("hello   world", 20), "hello world");
+});
+
+test("readRegistrySnapshot keeps an extension guide: collapsed, cut to the limit, empty when absent", () => {
+  const registry = {
+    guided: {
+      name: "Guided",
+      guide: `  Use   these\ntools.  ${"x".repeat(2000)}`,
+      tools: [{ name: "g_one", readOnly: true, description: "One.", execute: () => 1 }],
+    },
+    plain: { name: "Plain", tools: [{ name: "p_one", execute: () => 1 }] },
+    odd: { name: "Odd", guide: 42, tools: [{ name: "o_one", execute: () => 1 }] },
+    blank: { name: "Blank", guide: "   ", tools: [{ name: "b_one", execute: () => 1 }] },
+  };
+  const snap = readRegistrySnapshot(() => registry);
+  const guided = snap.byKey.get("guided").guide;
+  assert.equal(guided.length, MAX_GUIDE_CHARS);
+  assert.ok(guided.startsWith("Use these tools. xxx"));
+  assert.equal(guided.endsWith("…"), true);
+  assert.equal(snap.byKey.get("plain").guide, "");
+  assert.equal(snap.byKey.get("odd").guide, "");
+  assert.equal(snap.byKey.get("blank").guide, "");
 });

@@ -1,7 +1,7 @@
-/* Tool Hub v0.3.0 | MIT | generated; edit src/ */
+/* Tool Hub v0.4.0 | MIT | generated; edit src/ */
 
 // src/constants.js
-var HUB_VERSION = "0.3.0";
+var HUB_VERSION = "0.4.0";
 var LOG_PREFIX = "[roam-tool-hub]";
 var RUNTIME_VERSION_KEY = "__ROAM_TOOL_HUB_VERSION";
 var MAX_TOOL_DESCRIPTION_CHARS = 300;
@@ -10,12 +10,15 @@ var MAX_DESCRIBE_TOOLS = 5;
 var DEFAULT_FIND_LIMIT = 25;
 var MAX_FIND_LIMIT = 100;
 var MAX_RESULT_CHARS = 4e4;
+var MAX_GUIDE_CHARS = 900;
 var GUIDELINES_PAGE_TITLE = "roam/agent guidelines";
 var GUIDELINES_SUMMARY_THRESHOLD = 20;
 var SETTING_IDS = Object.freeze({
   refreshButton: "refresh-extensions",
   guidelinesEnabled: "guidelines-index-enabled",
-  guidelinesBlockUid: "guidelines-block-uid"
+  guidelinesBlockUid: "guidelines-block-uid",
+  chatBridgeEnabled: "chat-bridge-enabled",
+  chatAutoLoad: "chat-auto-load"
 });
 
 // src/registry.js
@@ -127,12 +130,14 @@ function readRegistrySnapshot(getRegistry = defaultRegistryGetter) {
     const readCount = tools.filter((t) => t.readOnly).length;
     const writeCount = tools.length - readCount;
     const summary = deriveExtensionSummary(ext, tools);
+    const guide = typeof ext.guide === "string" && ext.guide.trim() ? truncateText(ext.guide, MAX_GUIDE_CHARS) : "";
     const record = {
       key: extKey,
       name,
       version,
       group,
       summary,
+      guide,
       tools,
       toolCount: tools.length,
       readCount,
@@ -155,6 +160,9 @@ function extensionEnabledSettingId(extKey) {
 function extensionWriteSettingId(extKey) {
   return `ext:${encodeSettingKeySegment(extKey)}:write`;
 }
+function extensionChatAutoSettingId(extKey) {
+  return `ext:${encodeSettingKeySegment(extKey)}:chat-auto`;
+}
 function isExtensionEnabled(extensionAPI, extKey) {
   const value = extensionAPI?.settings?.get?.(extensionEnabledSettingId(extKey));
   return value === null || value === void 0 ? true : Boolean(value);
@@ -166,6 +174,39 @@ function isExtensionWriteEnabled(extensionAPI, extKey) {
 function isGuidelinesIndexEnabled(extensionAPI) {
   const value = extensionAPI?.settings?.get?.(SETTING_IDS.guidelinesEnabled);
   return value === true;
+}
+function isChatBridgeEnabled(extensionAPI) {
+  return extensionAPI?.settings?.get?.(SETTING_IDS.chatBridgeEnabled) === true;
+}
+function isChatAutoLoadEnabled(extensionAPI) {
+  return extensionAPI?.settings?.get?.(SETTING_IDS.chatAutoLoad) !== false;
+}
+function isChatAutoApproved(extensionAPI, extKey) {
+  return extensionAPI?.settings?.get?.(extensionChatAutoSettingId(extKey)) === true;
+}
+async function setChatAutoApproved(extensionAPI, extKey, value) {
+  if (extensionAPI?.settings?.canSet === false) return;
+  await extensionAPI?.settings?.set?.(extensionChatAutoSettingId(extKey), Boolean(value));
+}
+function describeChatBridgeStatus(status) {
+  switch (status?.phase) {
+    case "waiting":
+      return "On. Roam's assistant has not loaded in this window yet; open the AI chat once.";
+    case "starting":
+      return "On. Starting.";
+    case "ready":
+      return "On. Attaches at the next chat turn.";
+    case "attached": {
+      const tools = Number(status.tools) || 0;
+      const extensions = Number(status.extensions) || 0;
+      const base = `On and attached: ${tools} tool${tools === 1 ? "" : "s"} from ${extensions} extension${extensions === 1 ? "" : "s"}.`;
+      return status.verified === true ? `${base} Confirmed in a chat turn.` : base;
+    }
+    case "failed":
+      return `Turned itself off: ${status.detail || "unknown reason"}.`;
+    default:
+      return "Off.";
+  }
 }
 function getGuidelinesBlockUid(extensionAPI) {
   const value = extensionAPI?.settings?.get?.(SETTING_IDS.guidelinesBlockUid);
@@ -180,6 +221,12 @@ async function seedExtensionDefaults(extensionAPI, extensions) {
   if (extensionAPI.settings.get(SETTING_IDS.guidelinesEnabled) == null) {
     await extensionAPI.settings.set(SETTING_IDS.guidelinesEnabled, false);
   }
+  if (extensionAPI.settings.get(SETTING_IDS.chatBridgeEnabled) == null) {
+    await extensionAPI.settings.set(SETTING_IDS.chatBridgeEnabled, false);
+  }
+  if (extensionAPI.settings.get(SETTING_IDS.chatAutoLoad) == null) {
+    await extensionAPI.settings.set(SETTING_IDS.chatAutoLoad, true);
+  }
   for (const ext of extensions) {
     const enabledId = extensionEnabledSettingId(ext.key);
     if (extensionAPI.settings.get(enabledId) == null) {
@@ -189,13 +236,21 @@ async function seedExtensionDefaults(extensionAPI, extensions) {
     if (extensionAPI.settings.get(writeId) == null) {
       await extensionAPI.settings.set(writeId, false);
     }
+    const chatAutoId = extensionChatAutoSettingId(ext.key);
+    if (extensionAPI.settings.get(chatAutoId) == null) {
+      await extensionAPI.settings.set(chatAutoId, false);
+    }
   }
 }
 function createSettingsPanel({
   extensions = [],
+  nativeExtensions = [],
+  chatStatus,
   onRefresh,
   onToggleExtension,
-  onToggleGuidelines
+  onToggleGuidelines,
+  onToggleChatBridge,
+  onToggleChatAutoLoad
 } = {}) {
   const settings = [
     {
@@ -220,8 +275,41 @@ function createSettingsPanel({
           void onToggleGuidelines?.(Boolean(event?.target?.checked));
         }
       }
+    },
+    {
+      id: SETTING_IDS.chatBridgeEnabled,
+      name: "Built-in chat bridge (experimental)",
+      description: `Let Roam's own AI chat (Cmd-J, Ask AI) use these extensions' tools. Uses an undocumented part of Roam and turns itself off if Roam changes it. Status: ${describeChatBridgeStatus(chatStatus)}`,
+      action: {
+        type: "switch",
+        onChange: (event) => {
+          void onToggleChatBridge?.(Boolean(event?.target?.checked));
+        }
+      }
+    },
+    {
+      id: SETTING_IDS.chatAutoLoad,
+      name: "Chat: load matching tools automatically",
+      description: "Before each chat turn, put the tools that match your message in front of the model so it does not have to look for them.",
+      action: {
+        type: "switch",
+        onChange: (event) => {
+          void onToggleChatAutoLoad?.(Boolean(event?.target?.checked));
+        }
+      }
     }
   ];
+  const chatAutoRow = (ext, name, description) => ({
+    id: extensionChatAutoSettingId(ext.key),
+    name: `${name} — chat may change the graph without asking`,
+    description,
+    action: {
+      type: "switch",
+      onChange: (event) => {
+        void onToggleExtension?.(ext.key, "chatAuto", Boolean(event?.target?.checked));
+      }
+    }
+  });
   for (const ext of extensions) {
     const counts = `${ext.toolCount} tool${ext.toolCount === 1 ? "" : "s"} (${ext.readCount} read, ${ext.writeCount} write)`;
     settings.push({
@@ -246,6 +334,46 @@ function createSettingsPanel({
         }
       }
     });
+    if (ext.writeCount > 0) {
+      settings.push(chatAutoRow(
+        ext,
+        ext.name,
+        `Skip the confirm dialog when the built-in chat runs a writing tool from ${ext.key}. Default off.`
+      ));
+    }
+  }
+  for (const ext of nativeExtensions) {
+    const counts = `${ext.toolCount} tool${ext.toolCount === 1 ? "" : "s"} (${ext.readCount} read, ${ext.writeCount} write)`;
+    const label = `${ext.name} (native AI tools)`;
+    settings.push({
+      id: extensionEnabledSettingId(ext.key),
+      name: `${label} — expose tools`,
+      description: `Allow the built-in chat bridge to offer read-only tools from ${ext.key} (${counts}). The switch applies to the built-in chat bridge only, since MCP clients already see native tools directly.`,
+      action: {
+        type: "switch",
+        onChange: (event) => {
+          void onToggleExtension?.(ext.key, "enabled", Boolean(event?.target?.checked));
+        }
+      }
+    });
+    settings.push({
+      id: extensionWriteSettingId(ext.key),
+      name: `${label} — allow writing tools`,
+      description: `Allow the built-in chat bridge to offer ${ext.writeCount} non-read-only tool${ext.writeCount === 1 ? "" : "s"} from ${ext.key}. The switch applies to the built-in chat bridge only, since MCP clients already see native tools directly. Default off.`,
+      action: {
+        type: "switch",
+        onChange: (event) => {
+          void onToggleExtension?.(ext.key, "write", Boolean(event?.target?.checked));
+        }
+      }
+    });
+    if (ext.writeCount > 0) {
+      settings.push(chatAutoRow(
+        ext,
+        label,
+        `Skip the confirm dialog when the built-in chat runs a writing tool from ${ext.key}. The switch applies to the built-in chat bridge only, since MCP clients already see native tools directly. Default off.`
+      ));
+    }
   }
   return {
     tabTitle: "Tool Hub",
@@ -253,259 +381,570 @@ function createSettingsPanel({
   };
 }
 
-// src/guidelines-index.js
-var GUIDELINES_HEADING = "**Tool Hub** (Local MCP call_extension_tool only — in built-in Cmd-J chat, ignore this section and use normal Roam blocks/tables directly)";
-var PAGE_PULL_PATTERN = "[:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order]}]}]";
-var BLOCK_PULL_PATTERN = "[:block/uid :block/string {:block/page [:node/title :block/uid]} {:block/children [:block/uid :block/string :block/order]}]";
-function sortByOrder(children) {
-  if (!Array.isArray(children)) return [];
-  return [...children].sort((a, b) => (a?.[":block/order"] ?? 0) - (b?.[":block/order"] ?? 0));
+// src/chat-catalog.js
+var FIND_TOOL_NAME = "find_extension_tools";
+var NATIVE_KEY_PREFIX = "native:";
+var DEFAULT_LOAD_LIMIT = 8;
+var MAX_LOAD_LIMIT = 15;
+var MAX_PRELOAD = 6;
+var MAX_CHAT_DESCRIPTION_CHARS = 1800;
+var PRELOAD_MIN_SCORE = 5.5;
+var PRELOAD_RELATIVE_SCORE = 0.55;
+var MAX_SHORT_DESCRIPTION_CHARS = 300;
+var MAX_SUMMARY_CHARS2 = 140;
+var MAX_INDEX_NAMES_PER_EXTENSION = 40;
+var MAX_INDEX_NAMES_TOTAL = 160;
+var MAX_QUERY_TOKENS = 60;
+var CHAT_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+var HUB_SIGNATURE_NAMES = ["list_extensions", "describe_tools", "run_read_tool"];
+var COMPANION_NAME_TOKENS = /* @__PURE__ */ new Map([["search", 2], ["list", 2], ["find", 2], ["get", 1], ["read", 1]]);
+var GENERIC_TOKENS = /* @__PURE__ */ new Set([
+  "list",
+  "get",
+  "create",
+  "add",
+  "set",
+  "delete",
+  "remove",
+  "find",
+  "search",
+  "update",
+  "modify",
+  "insert",
+  "apply",
+  "return",
+  "read",
+  "write",
+  "change",
+  "edit",
+  "open",
+  "run",
+  "name",
+  "value",
+  "text",
+  "item",
+  "thing",
+  "first",
+  "last",
+  "next",
+  "current",
+  "today",
+  "day"
+]);
+var GENERIC_TOKEN_WEIGHT = 0.4;
+var ROAM_CHAT_TOOL_NAMES = Object.freeze([
+  "get_block",
+  "get_page",
+  "get_backlinks",
+  "search",
+  "get_comments",
+  "search_templates",
+  "roam_query",
+  "datalog_query",
+  "get_open_windows",
+  "get_selection",
+  "suggest_links",
+  "semantic_search",
+  "file_get",
+  "create_page",
+  "create_block",
+  "append_to_daily_note",
+  "update_block",
+  "delete_block",
+  "move_block",
+  "add_comment",
+  "delete_page",
+  "update_page",
+  "open_main_window",
+  "open_sidebar",
+  "add_shortcut",
+  "remove_shortcut",
+  "file_delete",
+  "web_search",
+  "get_graph_guidelines",
+  "call_extension_tool",
+  "file_upload"
+]);
+var STOP_WORDS = /* @__PURE__ */ new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "that",
+  "this",
+  "from",
+  "into",
+  "your",
+  "you",
+  "are",
+  "can",
+  "use",
+  "all",
+  "any",
+  "not",
+  "but",
+  "via",
+  "one",
+  "new",
+  "please",
+  "want",
+  "need",
+  "make",
+  "show",
+  "give",
+  "tell",
+  "what",
+  "which",
+  "how",
+  "when",
+  "where",
+  "there",
+  "have",
+  "has",
+  "some",
+  "then",
+  "them",
+  "they",
+  "their",
+  "about",
+  "also",
+  "just",
+  "like",
+  "would",
+  "should",
+  "could",
+  "its",
+  "out",
+  "who",
+  "was",
+  "were",
+  "will",
+  "does",
+  "did",
+  "our",
+  "her",
+  "his",
+  "him",
+  "she",
+  "here",
+  "each",
+  "every",
+  "more",
+  "most",
+  "than",
+  "roam",
+  "block",
+  "blocks",
+  "page",
+  "pages",
+  "graph",
+  "uid",
+  "tool",
+  "tools"
+]);
+function deriveChatAccess(roamToolNames) {
+  const names = new Set(Array.isArray(roamToolNames) ? roamToolNames : []);
+  if (names.has("update_block")) return "edit";
+  if (names.has("create_block")) return "append";
+  return "read";
 }
-function defaultRoamApiGetter() {
-  if (typeof globalThis.window !== "undefined" && globalThis.window.roamAlphaAPI) {
-    return globalThis.window.roamAlphaAPI;
-  }
-  return globalThis.roamAlphaAPI || null;
+function isToolAllowed(tool, access) {
+  return tool.readOnly || access !== "read";
 }
-function generateUid(roamAlphaAPI) {
-  if (typeof roamAlphaAPI?.util?.generateUID === "function") {
-    return roamAlphaAPI.util.generateUID();
-  }
-  return `rth${Math.random().toString(36).slice(2, 10)}`;
+function sanitizeNamePart(text) {
+  return String(text ?? "").replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
 }
-function sanitizeRoamMarkup(text) {
-  let out = String(text ?? "").replace(/\s+/g, " ").replace(/`/g, "'").trim();
-  if (!out) return "";
-  for (let pass = 0; pass < 8; pass += 1) {
-    const next = out.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }").replace(/\[\[/g, "[ [").replace(/\]\]/g, "] ]").replace(/\(\(/g, "( (").replace(/\)\)/g, ") )").replace(/::/g, ":");
-    if (next === out) break;
-    out = next;
-  }
-  return out.replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
+function lastPathSegment(text) {
+  const cleaned = String(text ?? "").replace(/\/+$/, "");
+  return cleaned.slice(cleaned.lastIndexOf("/") + 1) || cleaned;
 }
-function pullWithReceiver(roamAlphaAPI, pattern, entity) {
-  const pull = roamAlphaAPI?.data?.pull || roamAlphaAPI?.pull;
-  if (typeof pull !== "function") return null;
-  try {
-    return pull.call(roamAlphaAPI.data || roamAlphaAPI, pattern, entity);
-  } catch {
-    return null;
-  }
+function nativeDisplayName(extensionId) {
+  const words = lastPathSegment(extensionId).replace(/^roam[-_]/i, "").split(/[^A-Za-z0-9]+/).filter(Boolean).map((word) => word[0].toUpperCase() + word.slice(1));
+  return words.join(" ") || String(extensionId);
 }
-function pullGuidelinesPage(roamAlphaAPI) {
-  return pullWithReceiver(roamAlphaAPI, PAGE_PULL_PATTERN, [
-    ":node/title",
-    GUIDELINES_PAGE_TITLE
-  ]);
+function firstSentence2(text) {
+  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
+  const match = clean.match(/^.+?[.!?](?=\s|$)/);
+  return match ? match[0] : clean;
 }
-function findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid) {
-  if (!storedUid) return null;
-  const direct = pullWithReceiver(roamAlphaAPI, BLOCK_PULL_PATTERN, [":block/uid", storedUid]);
-  if (direct?.[":block/uid"] === storedUid) {
-    const pageRef = Array.isArray(direct[":block/page"]) ? direct[":block/page"][0] : direct[":block/page"];
-    const pageTitle = pageRef?.[":node/title"];
-    const pageUid = pageRef?.[":block/uid"];
-    if (pageTitle === GUIDELINES_PAGE_TITLE || page?.[":block/uid"] && pageUid === page[":block/uid"]) {
-      return direct;
-    }
-  }
-  const topLevel = sortByOrder(page?.[":block/children"]);
-  return topLevel.find((child) => child?.[":block/uid"] === storedUid) || null;
-}
-async function withGuidelinesLock(roamAlphaAPI, fn) {
-  const locks = globalThis.navigator?.locks;
-  if (typeof locks?.request !== "function") {
-    return await fn();
-  }
-  const graphName = roamAlphaAPI?.graph?.name || "default";
-  const lockName = `roam-tool-hub:guidelines:${graphName}`;
-  return await locks.request(lockName, async () => await fn());
-}
-function buildGuidelinesIndexModel({
-  extensions = [],
-  isWriteEnabled = () => false
-} = {}) {
-  if (extensions.length === 0) {
-    return {
-      heading: GUIDELINES_HEADING,
-      children: [
-        "No extensions currently enabled in Tool Hub. Call list_extensions to check live tools."
-      ]
-    };
-  }
-  if (extensions.length <= GUIDELINES_SUMMARY_THRESHOLD) {
-    const children2 = extensions.map((ext) => {
-      const plural = ext.toolCount === 1 ? "tool" : "tools";
-      const writeState = isWriteEnabled(ext.key) ? "writes on" : "writes off";
-      const safeName = sanitizeRoamMarkup(ext.name);
-      const safeKey = sanitizeRoamMarkup(ext.key);
-      const safeSummary = sanitizeRoamMarkup(ext.summary);
-      return `**${safeName}** (\`${safeKey}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${safeSummary}`;
-    });
-    return { heading: GUIDELINES_HEADING, children: children2 };
-  }
+function readNativeExtensions(rawTools) {
   const groups = /* @__PURE__ */ new Map();
-  let totalTools = 0;
-  for (const ext of extensions) {
-    const groupName = sanitizeRoamMarkup(ext.group || "Other") || "Other";
-    if (!groups.has(groupName)) groups.set(groupName, { count: 0, tools: 0 });
-    const bucket = groups.get(groupName);
-    bucket.count += 1;
-    bucket.tools += ext.toolCount;
-    totalTools += ext.toolCount;
-  }
-  const sortedGroups = [...groups.entries()].sort(([a], [b]) => {
-    if (a === "Other" && b !== "Other") return 1;
-    if (b === "Other" && a !== "Other") return -1;
-    return a.localeCompare(b, void 0, { sensitivity: "base" });
-  });
-  const children = sortedGroups.map(([groupName, stats]) => {
-    const extWord = stats.count === 1 ? "extension" : "extensions";
-    const toolWord = stats.tools === 1 ? "tool" : "tools";
-    return `${groupName}: ${stats.count} ${extWord} (${stats.tools} ${toolWord})`;
-  });
-  children.push(
-    `Total: ${extensions.length} enabled extensions (${totalTools} tools). Call list_extensions to browse them.`
-  );
-  return { heading: GUIDELINES_HEADING, children };
-}
-async function syncGuidelinesIndex({
-  extensionAPI,
-  roamAlphaAPI = defaultRoamApiGetter(),
-  getRegistry = defaultRegistryGetter,
-  forceEnabled,
-  allowShrink = true
-} = {}) {
-  const enabled = forceEnabled !== void 0 ? Boolean(forceEnabled) : isGuidelinesIndexEnabled(extensionAPI);
-  if (!enabled) {
-    return { status: "disabled", writes: 0 };
-  }
-  if (extensionAPI?.settings?.canSet === false) {
-    return { status: "read-only-settings", writes: 0 };
-  }
-  if (!roamAlphaAPI?.data?.block || !roamAlphaAPI?.data?.page) {
-    return { status: "no-roam-api", writes: 0 };
-  }
-  return await withGuidelinesLock(roamAlphaAPI, async () => {
-    if (forceEnabled === void 0 && !isGuidelinesIndexEnabled(extensionAPI)) {
-      return { status: "disabled", writes: 0 };
-    }
-    const snapshot = readRegistrySnapshot(getRegistry);
-    const enabledExts = snapshot.extensions.filter((ext) => isExtensionEnabled(extensionAPI, ext.key));
-    const model = buildGuidelinesIndexModel({
-      extensions: enabledExts,
-      isWriteEnabled: (key) => isExtensionWriteEnabled(extensionAPI, key)
+  for (const raw of Array.isArray(rawTools) ? rawTools : []) {
+    const id = typeof raw?.tool === "string" ? raw.tool.trim() : "";
+    if (!id) continue;
+    const extensionId = typeof raw.extension === "string" && raw.extension ? raw.extension : id.slice(0, Math.max(0, id.lastIndexOf("/")));
+    const name = (id.startsWith(extensionId) ? id.slice(extensionId.length) : lastPathSegment(id)).replace(/^\/+/, "");
+    if (!name || !extensionId) continue;
+    if (!groups.has(extensionId)) groups.set(extensionId, []);
+    const description = typeof raw.description === "string" ? raw.description.trim() : "";
+    const parameters = raw.inputSchema && typeof raw.inputSchema === "object" && !Array.isArray(raw.inputSchema) ? raw.inputSchema : { type: "object", properties: {} };
+    groups.get(extensionId).push({
+      id,
+      name,
+      description,
+      shortDescription: truncateText(description, MAX_SHORT_DESCRIPTION_CHARS),
+      readOnly: raw.scope === "read",
+      scope: typeof raw.scope === "string" ? raw.scope : "edit",
+      parameters,
+      native: true
     });
-    let page = pullGuidelinesPage(roamAlphaAPI);
-    let pageUid = page?.[":block/uid"] || null;
-    let writes = 0;
-    if (!pageUid) {
-      const candidateUid = generateUid(roamAlphaAPI);
-      try {
-        await roamAlphaAPI.data.page.create({
-          page: { title: GUIDELINES_PAGE_TITLE, uid: candidateUid }
-        });
-        writes += 1;
-      } catch {
-      }
-      page = pullGuidelinesPage(roamAlphaAPI);
-      pageUid = page?.[":block/uid"] || null;
-      if (!pageUid) {
-        return { status: "page-create-failed", writes };
-      }
+  }
+  const extensions = [];
+  for (const [extensionId, tools] of groups) {
+    const names = new Set(tools.map((tool) => tool.name));
+    if (HUB_SIGNATURE_NAMES.every((name2) => names.has(name2))) continue;
+    const key = `${NATIVE_KEY_PREFIX}${extensionId}`;
+    const name = nativeDisplayName(extensionId);
+    for (const tool of tools) {
+      tool.extensionKey = key;
+      tool.extensionName = name;
     }
-    const storedUid = getGuidelinesBlockUid(extensionAPI);
-    const existingBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
-    if (!existingBlock) {
-      if (!allowShrink && enabledExts.length === 0) {
-        return { status: "deferred-empty-boot", writes: 0 };
-      }
-      const parentUid = generateUid(roamAlphaAPI);
-      await roamAlphaAPI.data.block.create({
-        location: { "parent-uid": pageUid, order: "last" },
-        block: { uid: parentUid, string: model.heading }
-      });
-      writes += 1;
-      await setGuidelinesBlockUid(extensionAPI, parentUid);
-      for (let i = 0; i < model.children.length; i += 1) {
-        await roamAlphaAPI.data.block.create({
-          location: { "parent-uid": parentUid, order: i },
-          block: { uid: generateUid(roamAlphaAPI), string: model.children[i] }
-        });
-        writes += 1;
-      }
-      return { status: "created", uid: parentUid, writes };
+    const readCount = tools.filter((tool) => tool.readOnly).length;
+    const sentences = [];
+    for (const tool of tools) {
+      const sentence = firstSentence2(tool.description);
+      if (sentence && !sentences.includes(sentence)) sentences.push(sentence);
+      if (sentences.length >= 2) break;
     }
-    const existingChildren = sortByOrder(existingBlock[":block/children"]);
-    if (!allowShrink && (enabledExts.length === 0 || model.children.length < existingChildren.length)) {
-      return { status: "preserved-on-boot", uid: storedUid, writes: 0 };
-    }
-    const headingMatches = existingBlock[":block/string"] === model.heading;
-    const childrenMatch = existingChildren.length === model.children.length && existingChildren.every((child, index) => child?.[":block/string"] === model.children[index]);
-    if (headingMatches && childrenMatch) {
-      return { status: "unchanged", uid: storedUid, writes: 0 };
-    }
-    if (!headingMatches) {
-      await roamAlphaAPI.data.block.update({
-        block: { uid: storedUid, string: model.heading }
-      });
-      writes += 1;
-    }
-    const sharedCount = Math.min(existingChildren.length, model.children.length);
-    for (let i = 0; i < sharedCount; i += 1) {
-      if (existingChildren[i]?.[":block/string"] !== model.children[i]) {
-        await roamAlphaAPI.data.block.update({
-          block: { uid: existingChildren[i][":block/uid"], string: model.children[i] }
-        });
-        writes += 1;
-      }
-    }
-    for (let i = existingChildren.length; i < model.children.length; i += 1) {
-      await roamAlphaAPI.data.block.create({
-        location: { "parent-uid": storedUid, order: i },
-        block: { uid: generateUid(roamAlphaAPI), string: model.children[i] }
-      });
-      writes += 1;
-    }
-    for (let i = existingChildren.length - 1; i >= model.children.length; i -= 1) {
-      await roamAlphaAPI.data.block.delete({
-        block: { uid: existingChildren[i][":block/uid"] }
-      });
-      writes += 1;
-    }
-    return { status: "updated", uid: storedUid, writes };
-  });
+    extensions.push({
+      key,
+      name,
+      version: null,
+      group: null,
+      native: true,
+      guide: "",
+      summary: truncateText(sentences.join(" ") || `Tools: ${tools.map((t) => t.name).join(", ")}`, MAX_SUMMARY_CHARS2),
+      tools,
+      toolCount: tools.length,
+      readCount,
+      writeCount: tools.length - readCount
+    });
+  }
+  extensions.sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }) || a.key.localeCompare(b.key));
+  return extensions;
 }
-async function removeGuidelinesIndex({
+function normalizeToken(token) {
+  if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
+  return token;
+}
+function tokenize(text) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of String(text ?? "").toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+    if (raw.length < 3 || STOP_WORDS.has(raw)) continue;
+    const token = normalizeToken(raw);
+    if (STOP_WORDS.has(token) || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+function tokensMatch(a, b) {
+  if (a === b) return true;
+  const shorter = Math.min(a.length, b.length);
+  if (shorter < 4) return false;
+  let common = 0;
+  while (common < shorter && a.charCodeAt(common) === b.charCodeAt(common)) common += 1;
+  return common >= Math.max(4, shorter - 1);
+}
+function buildSearchIndex(tools) {
+  const docs = tools.map((tool) => {
+    const fields = [
+      { weight: 3, tokens: tokenize(`${tool.name} ${tool.chatName}`.replace(/[_-]+/g, " ")) },
+      { weight: 2.5, tokens: tokenize(tool.extensionName) },
+      { weight: 1, tokens: tokenize(Object.keys(tool.parameters?.properties ?? {}).join(" ").replace(/[_-]+/g, " ")) },
+      { weight: 1, tokens: tokenize(tool.description) }
+    ];
+    return { tool, fields };
+  });
+  const documentFrequency = /* @__PURE__ */ new Map();
+  for (const doc of docs) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const field of doc.fields) for (const token of field.tokens) seen.add(token);
+    for (const token of seen) documentFrequency.set(token, (documentFrequency.get(token) ?? 0) + 1);
+  }
+  const total = Math.max(1, docs.length);
+  const idf = (token) => Math.log(1 + total / (documentFrequency.get(token) ?? total));
+  return { docs, idf };
+}
+function rankTools(catalog, text) {
+  const queryTokens = tokenize(text).slice(0, MAX_QUERY_TOKENS);
+  if (queryTokens.length === 0) return [];
+  const { docs, idf } = catalog.searchIndex;
+  const ranked = [];
+  for (const doc of docs) {
+    let score = 0;
+    for (const queryToken of queryTokens) {
+      let best = 0;
+      for (const field of doc.fields) {
+        for (const token of field.tokens) {
+          if (!tokensMatch(queryToken, token)) continue;
+          const value = idf(token) * field.weight;
+          if (value > best) best = value;
+        }
+      }
+      score += GENERIC_TOKENS.has(queryToken) ? best * GENERIC_TOKEN_WEIGHT : best;
+    }
+    if (score > 0) ranked.push({ tool: doc.tool, score });
+  }
+  ranked.sort((a, b) => b.score - a.score || a.tool.order - b.tool.order);
+  return ranked;
+}
+function assignChatNames(tools, reservedNames) {
+  const used = new Set(reservedNames);
+  for (const tool of tools) {
+    const base = sanitizeNamePart(tool.name).slice(0, 64);
+    let candidate = base;
+    if (!CHAT_TOOL_NAME_RE.test(candidate) || used.has(candidate)) {
+      const prefix = sanitizeNamePart(
+        tool.native ? lastPathSegment(tool.extensionKey.slice(NATIVE_KEY_PREFIX.length)) : tool.extensionKey
+      ) || "ext";
+      candidate = `${prefix}__${base || "tool"}`.slice(0, 64);
+    }
+    let unique = candidate;
+    for (let n = 2; used.has(unique) || !CHAT_TOOL_NAME_RE.test(unique); n += 1) {
+      const suffix = `_${n}`;
+      unique = `${candidate.slice(0, 64 - suffix.length)}${suffix}`;
+      if (n > 999) break;
+    }
+    used.add(unique);
+    tool.chatName = unique;
+  }
+}
+function cloneSchema(parameters) {
+  let schema;
+  try {
+    schema = JSON.parse(JSON.stringify(parameters ?? {}));
+  } catch {
+    schema = {};
+  }
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) schema = {};
+  if (schema.type !== "object") schema.type = "object";
+  if (!schema.properties || typeof schema.properties !== "object" || Array.isArray(schema.properties)) {
+    schema.properties = {};
+  }
+  return schema;
+}
+function buildChatCatalog({
+  registryExtensions = [],
+  nativeExtensions = [],
   extensionAPI,
-  roamAlphaAPI = defaultRoamApiGetter()
+  reservedNames = []
 } = {}) {
-  if (extensionAPI?.settings?.canSet === false) {
-    return { status: "read-only-settings", deleted: false };
-  }
-  if (!roamAlphaAPI?.data?.block) {
-    return { status: "no-roam-api", deleted: false };
-  }
-  return await withGuidelinesLock(roamAlphaAPI, async () => {
-    const storedUid = getGuidelinesBlockUid(extensionAPI);
-    if (!storedUid) {
-      return { status: "not-found", deleted: false };
-    }
-    const page = pullGuidelinesPage(roamAlphaAPI);
-    const ownedBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
-    if (ownedBlock) {
-      await roamAlphaAPI.data.block.delete({
-        block: { uid: storedUid }
-      });
-    }
-    await setGuidelinesBlockUid(extensionAPI, null);
-    return {
-      status: ownedBlock ? "removed" : "cleared-stale-uid",
-      uid: storedUid,
-      deleted: Boolean(ownedBlock)
+  const extensions = [];
+  const tools = [];
+  for (const ext of [...registryExtensions, ...nativeExtensions]) {
+    if (!ext || !Array.isArray(ext.tools)) continue;
+    if (!isExtensionEnabled(extensionAPI, ext.key)) continue;
+    const writeEnabled = isExtensionWriteEnabled(extensionAPI, ext.key);
+    const visible = ext.tools.filter((tool) => tool.readOnly || writeEnabled);
+    if (visible.length === 0) continue;
+    const record = {
+      key: ext.key,
+      name: ext.name,
+      native: ext.native === true,
+      summary: ext.summary || "",
+      guide: truncateText(typeof ext.guide === "string" ? ext.guide : "", MAX_GUIDE_CHARS),
+      writeEnabled,
+      hiddenWriteCount: ext.tools.length - visible.length,
+      tools: []
     };
-  });
+    for (const tool of visible) {
+      const entry = {
+        id: tool.id,
+        name: tool.name,
+        chatName: "",
+        native: ext.native === true,
+        extensionKey: ext.key,
+        extensionName: ext.name,
+        description: tool.description || "",
+        shortDescription: tool.shortDescription || truncateText(tool.description || "", MAX_SHORT_DESCRIPTION_CHARS),
+        readOnly: tool.readOnly === true,
+        parameters: cloneSchema(tool.parameters),
+        order: tools.length
+      };
+      record.tools.push(entry);
+      tools.push(entry);
+    }
+    extensions.push(record);
+  }
+  assignChatNames(tools, [FIND_TOOL_NAME, ...ROAM_CHAT_TOOL_NAMES, ...reservedNames]);
+  const byName = new Map(tools.map((tool) => [tool.chatName, tool]));
+  const aliases = /* @__PURE__ */ new Map();
+  for (const tool of tools) {
+    aliases.set(tool.id, tool);
+    if (!aliases.has(tool.name)) aliases.set(tool.name, tool);
+  }
+  const signature = JSON.stringify(extensions.map((ext) => [
+    ext.key,
+    ext.name,
+    ext.summary,
+    ext.guide,
+    ext.hiddenWriteCount,
+    ext.tools.map((tool) => [tool.chatName, tool.id, tool.readOnly, tool.description, tool.parameters])
+  ]));
+  return {
+    extensions,
+    tools,
+    byName,
+    aliases,
+    signature,
+    searchIndex: buildSearchIndex(tools)
+  };
 }
+function emptyChatCatalog() {
+  return buildChatCatalog({});
+}
+function renderIndexSection(catalog, { access = "edit", loadedNames = [] } = {}) {
+  const extensions = catalog.extensions.map((ext) => ({ ext, tools: ext.tools.filter((tool) => isToolAllowed(tool, access)) })).filter((row) => row.tools.length > 0);
+  if (extensions.length === 0) return void 0;
+  const total = extensions.reduce((sum, row) => sum + row.tools.length, 0);
+  const perExtension = total > MAX_INDEX_NAMES_TOTAL ? Math.max(6, Math.floor(MAX_INDEX_NAMES_TOTAL / extensions.length)) : MAX_INDEX_NAMES_PER_EXTENSION;
+  const lines = [
+    "Extension tools. The person installed these Roam extensions and switched their tools on for you. They are supplied Roam tools, part of your normal toolset here, not outside apps or plugins.",
+    ""
+  ];
+  for (const { ext, tools } of extensions) {
+    const shown = tools.slice(0, perExtension).map((tool) => tool.readOnly ? tool.chatName : `${tool.chatName}*`);
+    const more = tools.length - shown.length;
+    lines.push(`- ${ext.name}: ${ext.summary}`.trimEnd());
+    lines.push(`  Tools: ${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}`);
+  }
+  lines.push("");
+  lines.push("A name marked * changes the graph.");
+  lines.push(
+    "When a request touches something one of these extensions manages, use its tools; do not write its block format by hand and do not tell the person to do it in the extension's own interface."
+  );
+  lines.push(
+    `A tool that is already in your tool list can be called directly. To use any other, first call ${FIND_TOOL_NAME} with its names from the lists above, or with a few words describing the task; the tools are then added to your tool list for your next step.`
+  );
+  if (access === "read") lines.push("This chat is read-only, so only tools that read are listed.");
+  const loaded = new Set(loadedNames);
+  const guides = [];
+  for (const { ext, tools } of extensions) {
+    if (ext.guide && tools.some((tool) => loaded.has(tool.chatName))) guides.push(`${ext.name}: ${ext.guide}`);
+  }
+  if (guides.length > 0) {
+    lines.push("");
+    lines.push("Notes from the extensions whose tools you have loaded:");
+    for (const guide of guides.slice(0, 4)) lines.push(`- ${guide}`);
+  }
+  return lines.join("\n");
+}
+function extensionMatches(tool, filter) {
+  const needle = String(filter ?? "").trim().toLowerCase();
+  if (!needle) return true;
+  return tool.extensionKey.toLowerCase().includes(needle) || tool.extensionName.toLowerCase().includes(needle);
+}
+function suggestTools(catalog, text, { access = "edit", exclude = [], max = MAX_PRELOAD } = {}) {
+  const skip = new Set(exclude);
+  const ranked = rankTools(catalog, text).filter((row) => isToolAllowed(row.tool, access));
+  if (ranked.length === 0 || ranked[0].score < PRELOAD_MIN_SCORE) return [];
+  const floor = Math.max(PRELOAD_MIN_SCORE, ranked[0].score * PRELOAD_RELATIVE_SCORE);
+  const primary = ranked.filter((row) => row.score >= floor).slice(0, Math.max(1, max - 2)).map((row) => row.tool);
+  const picked = [...primary];
+  const pickedNames = new Set(picked.map((tool) => tool.chatName));
+  const scoreByName = new Map(ranked.map((row) => [row.tool.chatName, row.score]));
+  for (const extensionKey of new Set(primary.map((tool) => tool.extensionKey))) {
+    if (picked.length >= max) break;
+    const candidates = catalog.tools.filter((tool) => tool.extensionKey === extensionKey && tool.readOnly && !pickedNames.has(tool.chatName)).map((tool) => ({
+      tool,
+      rank: Math.max(0, ...tool.name.toLowerCase().split(/[^a-z0-9]+/).map((token) => COMPANION_NAME_TOKENS.get(token) ?? 0))
+    })).filter((row) => row.rank > 0);
+    const locator = candidates.filter((row) => row.rank === 2).sort((a, b) => a.tool.order - b.tool.order)[0];
+    const rest = candidates.filter((row) => row !== locator).sort((a, b) => (scoreByName.get(b.tool.chatName) ?? 0) - (scoreByName.get(a.tool.chatName) ?? 0) || a.tool.order - b.tool.order);
+    const companions = [locator, rest[0]].filter(Boolean).map((row) => row.tool);
+    for (const tool of companions) {
+      if (picked.length >= max) break;
+      picked.push(tool);
+      pickedNames.add(tool.chatName);
+    }
+  }
+  return picked.filter((tool) => !skip.has(tool.chatName));
+}
+function findExtensionTools(args, { catalog, access = "edit", guidesSent = /* @__PURE__ */ new Set() } = {}) {
+  const requestedNames = Array.isArray(args?.names) ? args.names.filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim()) : [];
+  const query = typeof args?.query === "string" ? args.query.trim() : "";
+  const extension = typeof args?.extension === "string" ? args.extension.trim() : "";
+  const rawLimit = Number.isInteger(args?.limit) ? args.limit : DEFAULT_LOAD_LIMIT;
+  const limit = Math.max(1, Math.min(MAX_LOAD_LIMIT, rawLimit));
+  const selected = [];
+  const notLoaded = [];
+  let totalMatched = 0;
+  if (requestedNames.length > 0) {
+    for (const rawName of requestedNames.slice(0, MAX_LOAD_LIMIT)) {
+      const name = rawName.replace(/\*$/, "");
+      const tool = catalog.byName.get(name) ?? catalog.aliases.get(name);
+      if (!tool) {
+        notLoaded.push({ name: rawName, reason: "No such tool. Use a name from the extension tools list." });
+      } else if (!isToolAllowed(tool, access)) {
+        notLoaded.push({ name: tool.chatName, reason: "This chat is read-only and that tool changes the graph." });
+      } else if (!selected.includes(tool)) {
+        selected.push(tool);
+      }
+    }
+    totalMatched = selected.length;
+  } else {
+    let candidates;
+    if (query) {
+      candidates = rankTools(catalog, query).map((row) => row.tool);
+      if (candidates.length === 0) {
+        const needle = query.toLowerCase();
+        candidates = catalog.tools.filter((tool) => `${tool.chatName} ${tool.extensionName} ${tool.description}`.toLowerCase().includes(needle));
+      }
+    } else {
+      candidates = [...catalog.tools];
+    }
+    candidates = candidates.filter((tool) => extensionMatches(tool, extension) && isToolAllowed(tool, access));
+    totalMatched = candidates.length;
+    selected.push(...candidates.slice(0, limit));
+  }
+  const guides = {};
+  for (const tool of selected) {
+    const ext = catalog.extensions.find((row) => row.key === tool.extensionKey);
+    if (ext?.guide && !guidesSent.has(ext.key)) {
+      guides[ext.name] = ext.guide;
+      guidesSent.add(ext.key);
+    }
+  }
+  const payload = {
+    loaded: selected.map((tool) => tool.chatName),
+    tools: selected.map((tool) => ({
+      name: tool.chatName,
+      extension: tool.extensionName,
+      changes_graph: !tool.readOnly,
+      description: tool.shortDescription
+    }))
+  };
+  if (Object.keys(guides).length > 0) payload.guides = guides;
+  if (notLoaded.length > 0) payload.not_loaded = notLoaded;
+  if (totalMatched > selected.length) {
+    payload.more = `${totalMatched - selected.length} more matched. Narrow the query, name an extension, or pass exact names.`;
+  }
+  payload.note = selected.length > 0 ? "These tools are in your tool list from your next step, with their full parameters. Call them directly." : `Nothing matched. Extensions available: ${catalog.extensions.map((ext) => ext.name).join(", ") || "none"}.`;
+  return { payload, load: selected.map((tool) => tool.chatName) };
+}
+var FIND_TOOL_DESCRIPTION = "Load tools from the person's installed Roam extensions into your tool list. Pass `names` (exact names from the extension tools list in your instructions) or `query` (a few words about the task), optionally `extension` to stay inside one extension. Returns each loaded tool's description; the tools themselves are callable from your next step.";
+var FIND_TOOL_PARAMETERS = Object.freeze({
+  type: "object",
+  properties: {
+    names: {
+      type: "array",
+      items: { type: "string" },
+      maxItems: MAX_LOAD_LIMIT,
+      description: "Exact tool names to load."
+    },
+    query: { type: "string", description: "A few words about the task, used when you do not know the names." },
+    extension: { type: "string", description: "Limit the search to one extension, by name." },
+    limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_LOAD_LIMIT,
+      description: `How many tools a search may load (default ${DEFAULT_LOAD_LIMIT}).`
+    }
+  },
+  additionalProperties: false
+});
 
 // src/schema-validator.js
 function isPlainObject(value) {
@@ -880,6 +1319,7 @@ function createHubTools({
           summary: ext.summary
         };
         if (ext.version) row.version = ext.version;
+        if (ext.guide) row.guide = ext.guide;
         return row;
       });
       return {
@@ -936,11 +1376,18 @@ function createHubTools({
         }
       }
       const slice = matched.slice(0, limit);
-      return {
+      const response = {
         tools: slice,
         totalMatched: matched.length,
         truncated: matched.length > slice.length
       };
+      const guides = {};
+      for (const row of slice) {
+        const ext = enabled.find((candidate) => candidate.key === row.extension);
+        if (ext?.guide) guides[ext.key] = ext.guide;
+      }
+      if (Object.keys(guides).length > 0) response.guides = guides;
+      return response;
     }
   };
   const describe_tools = {
@@ -1099,6 +1546,1054 @@ function registerHubTools(extensionAPI, tools) {
   return removeRegistered;
 }
 
+// src/chat-bridge.js
+var CHAT_BRIDGE_STATE_KEY = "__roamToolHubChatBridge";
+var CHAT_EXTENSION_NAME = "tool-hub";
+var CHAT_SECTION_KEY = "toolhub";
+var RUNTIME_GLOBAL = "PiHarness";
+var ROAM_EXTENSION_NAME = "roam";
+var ROAM_CHAT_MARKER_TOOLS = ["get_page", "search"];
+var NATIVE_TOOLS_TTL_MS = 15e3;
+var NATIVE_TOOLS_TIMEOUT_MS = 1500;
+var DISCOVERY_TIMEOUT_MS = 1e4;
+var MAX_LOADED_PER_CONVERSATION = 24;
+var MAX_TRACKED_CONVERSATIONS = 200;
+var MAX_TRACKED_REGISTRIES = 4;
+var BLOCK_RUN_UID_RE = /user-authored Roam block with UID `([^`\s]{6,40})`/;
+var READ_ONLY_MESSAGE = "This conversation has read-only access to the graph.";
+function isPlainObject2(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function errorMessage(error) {
+  if (error instanceof Error && error.message) return error.message;
+  return typeof error === "string" ? error : String(error);
+}
+function textResult(value, isError = false) {
+  let text;
+  if (typeof value === "string") {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value ?? null);
+    } catch {
+      text = String(value);
+    }
+  }
+  return { output: [{ type: "text", text }], details: null, isError };
+}
+function extractText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => typeof part === "string" ? part : part?.type === "text" && typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n");
+}
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+function checkRuntimeShape(runtime) {
+  const durable = runtime?.durable;
+  const needed = [
+    [durable?.createRegistry, "durable.createRegistry"],
+    [durable?.defineExtension, "durable.defineExtension"],
+    [durable?.section, "durable.section"],
+    [durable?.hook, "durable.hook"],
+    [durable?.Harness?.open, "durable.Harness.open"],
+    [durable?.MemoryStorage, "durable.MemoryStorage"],
+    [runtime?.createModels, "createModels"]
+  ];
+  for (const [value, label] of needed) {
+    if (typeof value !== "function") return `${label} is missing`;
+  }
+  if (typeof durable.ToolTask?.definition?.name !== "string") return "durable.ToolTask is missing";
+  if (durable.BACKGROUND_CONTEXT === void 0 || durable.BACKGROUND_CONTEXT === null) {
+    return "durable.BACKGROUND_CONTEXT is missing";
+  }
+  return null;
+}
+function pageState(win) {
+  let state = win[CHAT_BRIDGE_STATE_KEY];
+  if (!state || typeof state !== "object") {
+    state = {
+      impl: null,
+      registries: /* @__PURE__ */ new Set(),
+      installed: /* @__PURE__ */ new WeakMap(),
+      conversations: /* @__PURE__ */ new Map(),
+      patches: null,
+      trap: null,
+      status: { phase: "off" }
+    };
+    Object.defineProperty(win, CHAT_BRIDGE_STATE_KEY, {
+      value: state,
+      configurable: true,
+      enumerable: false,
+      writable: true
+    });
+  }
+  return state;
+}
+function createChatBridge({
+  windowRef = globalThis.window,
+  extensionAPI,
+  getRegistrySnapshot,
+  getNativeTools: getNativeTools2 = async () => [],
+  runRegistryTool,
+  callNativeTool,
+  confirmWrite,
+  isAutoLoadEnabled = () => true,
+  isChatAutoApproved: isChatAutoApproved2 = () => false,
+  setChatAutoApproved: setChatAutoApproved2 = async () => {
+  },
+  readBlockText: readBlockText2 = () => "",
+  onStatus,
+  maxResultChars = MAX_RESULT_CHARS,
+  logger = console
+} = {}) {
+  const hasWindow = Boolean(windowRef);
+  if (!hasWindow) windowRef = {};
+  const state = pageState(windowRef);
+  const instanceId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let attached = false;
+  let runtime = null;
+  let catalog = emptyChatCatalog();
+  let installedNames = /* @__PURE__ */ new Set();
+  let refreshing = null;
+  let nativeCache = { at: 0, tools: [] };
+  const warned = /* @__PURE__ */ new Set();
+  const stats = { turns: 0, preloads: 0, finds: 0, calls: 0, blocked: 0, errors: 0 };
+  function warnOnce(key, error) {
+    stats.errors += 1;
+    if (warned.has(key)) return;
+    warned.add(key);
+    logger.warn?.(`${LOG_PREFIX} Chat bridge: ${key}`, error);
+  }
+  function setStatus(patch) {
+    state.status = {
+      ...state.status,
+      ...patch,
+      tools: catalog.tools.length,
+      extensions: catalog.extensions.length,
+      registries: state.registries.size,
+      stats: { ...stats },
+      updatedAt: Date.now()
+    };
+    try {
+      onStatus?.(state.status);
+    } catch {
+    }
+  }
+  function fail(detail, error) {
+    if (error) warnOnce(detail, error);
+    setStatus({ phase: "failed", detail });
+  }
+  function conversationState(id) {
+    if (id === void 0 || id === null) return { access: void 0, loaded: /* @__PURE__ */ new Set(), guidesSent: /* @__PURE__ */ new Set() };
+    let conv = state.conversations.get(id);
+    if (conv) {
+      state.conversations.delete(id);
+    } else {
+      conv = { access: void 0, loaded: /* @__PURE__ */ new Set(), guidesSent: /* @__PURE__ */ new Set(), probed: false };
+    }
+    state.conversations.set(id, conv);
+    while (state.conversations.size > MAX_TRACKED_CONVERSATIONS) {
+      state.conversations.delete(state.conversations.keys().next().value);
+    }
+    return conv;
+  }
+  function peekConversation(id) {
+    return id === void 0 || id === null ? void 0 : state.conversations.get(id);
+  }
+  function rememberLoaded(conv, names) {
+    for (const name of names) {
+      conv.loaded.delete(name);
+      conv.loaded.add(name);
+    }
+    while (conv.loaded.size > MAX_LOADED_PER_CONVERSATION) {
+      conv.loaded.delete(conv.loaded.values().next().value);
+    }
+  }
+  async function readNativeTools(force) {
+    const now = Date.now();
+    if (!force && now - nativeCache.at < NATIVE_TOOLS_TTL_MS) return nativeCache.tools;
+    try {
+      const tools = await withTimeout(Promise.resolve(getNativeTools2()), NATIVE_TOOLS_TIMEOUT_MS, "Reading native extension tools");
+      nativeCache = { at: Date.now(), tools: Array.isArray(tools) ? tools : [] };
+    } catch (error) {
+      warnOnce("native extension tools could not be read", error);
+      nativeCache = { at: Date.now(), tools: nativeCache.tools };
+    }
+    return nativeCache.tools;
+  }
+  function refresh({ force = false } = {}) {
+    if (refreshing) return force ? refreshing.then(() => refresh({ force })) : refreshing;
+    refreshing = (async () => {
+      const snapshot = getRegistrySnapshot();
+      const native = await readNativeTools(force);
+      const next = buildChatCatalog({
+        registryExtensions: snapshot?.extensions ?? [],
+        nativeExtensions: readNativeExtensions(native),
+        extensionAPI
+      });
+      const changed = next.signature !== catalog.signature;
+      if (changed) catalog = next;
+      if (changed || force) {
+        for (const registry of state.registries) installInto(registry);
+        setStatus({});
+      }
+    })().finally(() => {
+      refreshing = null;
+    });
+    return refreshing;
+  }
+  async function runFind(args, context) {
+    stats.finds += 1;
+    const conv = conversationState(context?.conversationId);
+    const { payload, load } = findExtensionTools(args, {
+      catalog,
+      access: conv.access ?? "edit",
+      guidesSent: conv.guidesSent
+    });
+    const usable = load.filter((name) => installedNames.has(name));
+    rememberLoaded(conv, usable);
+    const result = textResult(payload, false);
+    result.details = { found: payload.tools.length };
+    if (usable.length > 0) result.control = { addTools: usable };
+    return result;
+  }
+  async function runTool(chatName, args, context) {
+    stats.calls += 1;
+    const entry = catalog.byName.get(chatName);
+    if (!entry) {
+      return textResult({ error: `${chatName} is no longer available. Call ${FIND_TOOL_NAME} to see what is.` }, true);
+    }
+    if (!entry.readOnly && peekConversation(context?.conversationId)?.access === "read") {
+      return textResult({ error: READ_ONLY_MESSAGE }, true);
+    }
+    const toolArgs = isPlainObject2(args) ? args : {};
+    let raw;
+    try {
+      if (entry.native) {
+        const response = await callNativeTool(entry.id, toolArgs);
+        const value = isPlainObject2(response) && "result" in response ? response.result : response;
+        raw = finalizeToolResult(entry.id, value, maxResultChars);
+      } else {
+        raw = await runRegistryTool(entry.id, toolArgs);
+      }
+    } catch (error) {
+      raw = { tool: entry.id, code: "execution-error", error: errorMessage(error) };
+    }
+    const failed = isPlainObject2(raw) && typeof raw.error === "string" && typeof raw.code === "string";
+    if (failed) return textResult({ error: raw.error, code: raw.code }, true);
+    const body = isPlainObject2(raw) && "result" in raw && raw.truncated !== true ? raw.result : raw;
+    return textResult(body, false);
+  }
+  async function beforeTool(call, task, context) {
+    const name = call?.name;
+    if (typeof name !== "string" || !installedNames.has(name)) return void 0;
+    const entry = catalog.byName.get(name);
+    if (!entry || entry.readOnly) return void 0;
+    try {
+      const conv = peekConversation(task?.conversationId ?? context?.conversationId);
+      if (conv?.access === "read") {
+        stats.blocked += 1;
+        return { block: READ_ONLY_MESSAGE };
+      }
+      if (conv?.access && isChatAutoApproved2(entry.extensionKey)) return void 0;
+      if (typeof confirmWrite !== "function") {
+        stats.blocked += 1;
+        return { block: "Tool Hub has no way to ask the person to confirm this change, so it was not made." };
+      }
+      const decision = await confirmWrite({
+        toolName: entry.chatName,
+        toolId: entry.id,
+        extensionKey: entry.extensionKey,
+        extensionName: entry.extensionName,
+        description: entry.shortDescription,
+        args: isPlainObject2(call.arguments) ? call.arguments : {},
+        signal: context?.abortSignal ?? task?.signal
+      });
+      if (decision === "always") {
+        await setChatAutoApproved2(entry.extensionKey, true);
+        return void 0;
+      }
+      if (decision === "once") return void 0;
+      stats.blocked += 1;
+      return { block: "The user rejected this change." };
+    } catch (error) {
+      warnOnce("confirming a change failed", error);
+      stats.blocked += 1;
+      return { block: "Tool Hub could not confirm this change with the person, so it was not made." };
+    }
+  }
+  function renderSection(sectionContext) {
+    try {
+      const conv = peekConversation(sectionContext?.conversationId);
+      return renderIndexSection(catalog, {
+        access: conv?.access ?? "edit",
+        loadedNames: conv ? [...conv.loaded] : []
+      });
+    } catch (error) {
+      warnOnce("rendering the prompt section failed", error);
+      return void 0;
+    }
+  }
+  function buildExtension(roamNames) {
+    if (!runtime || catalog.tools.length === 0 || roamNames.has(FIND_TOOL_NAME)) return null;
+    const durable = runtime.durable;
+    const names = /* @__PURE__ */ new Set([FIND_TOOL_NAME]);
+    const tools = [{
+      name: FIND_TOOL_NAME,
+      label: "Find extension tools",
+      description: FIND_TOOL_DESCRIPTION,
+      parameters: FIND_TOOL_PARAMETERS,
+      executionMode: "parallel",
+      replay: "safe",
+      execute: (args, context) => runFind(args, context)
+    }];
+    for (const entry of catalog.tools) {
+      if (roamNames.has(entry.chatName) || names.has(entry.chatName)) continue;
+      names.add(entry.chatName);
+      tools.push({
+        name: entry.chatName,
+        label: `${entry.extensionName}: ${entry.name}`,
+        description: truncateText(`[${entry.extensionName}] ${entry.description || entry.name}`, MAX_CHAT_DESCRIPTION_CHARS),
+        parameters: entry.parameters,
+        deferred: true,
+        executionMode: entry.readOnly ? "parallel" : "sequential",
+        replay: entry.readOnly ? "safe" : "unsafe",
+        outputLimits: { maxBytes: 24e4, maxLines: 6e4 },
+        execute: (args, context) => runTool(entry.chatName, args, context)
+      });
+    }
+    return {
+      names,
+      extension: durable.defineExtension({
+        name: CHAT_EXTENSION_NAME,
+        tools,
+        sections: [durable.section(CHAT_SECTION_KEY, renderSection)],
+        hooks: [durable.hook(durable.ToolTask, { beforeTool })]
+      })
+    };
+  }
+  function installInto(registry) {
+    if (!attached || !runtime) return;
+    try {
+      const roam = registry.snapshot()?.extension?.(ROAM_EXTENSION_NAME);
+      if (!roam) return;
+      const roamNames = new Set((roam.tools ?? []).map((tool) => tool?.name).filter(Boolean));
+      const key = `${instanceId}\0${catalog.signature}\0${[...roamNames].sort().join(",")}`;
+      if (state.installed.get(registry) !== key) {
+        const built = buildExtension(roamNames);
+        if (!built) {
+          registry.uninstall({ name: CHAT_EXTENSION_NAME });
+          state.installed.delete(registry);
+          installedNames = /* @__PURE__ */ new Set();
+        } else {
+          registry.install(built.extension);
+          state.installed.set(registry, key);
+          installedNames = built.names;
+        }
+      }
+      if (state.patches?.conversation && state.installed.has(registry)) {
+        setStatus({ phase: "attached", detail: "" });
+      }
+    } catch (error) {
+      fail("installing into the chat registry failed", error);
+    }
+  }
+  function adoptRegistry(registry) {
+    state.registries.delete(registry);
+    state.registries.add(registry);
+    while (state.registries.size > MAX_TRACKED_REGISTRIES) {
+      state.registries.delete(state.registries.values().next().value);
+    }
+    installInto(registry);
+  }
+  async function augmentConfig(conversation, config, context) {
+    if (!isPlainObject2(config) || !Array.isArray(config.tools)) return config;
+    const roamNames = config.tools.map((tool) => tool?.name).filter((name) => typeof name === "string");
+    if (!ROAM_CHAT_MARKER_TOOLS.some((name) => roamNames.includes(name))) return config;
+    stats.turns += 1;
+    const conv = conversationState(conversation.id);
+    conv.access = deriveChatAccess(roamNames);
+    await refresh();
+    if (!conv.probed) {
+      conv.probed = true;
+      try {
+        await conversation.agent(context);
+        await Promise.resolve();
+      } catch (error) {
+        warnOnce("probing the conversation failed", error);
+      }
+    }
+    const taken = new Set(roamNames);
+    const allowed = catalog.tools.filter((tool) => installedNames.has(tool.chatName) && !taken.has(tool.chatName) && (tool.readOnly || conv.access !== "read"));
+    if (allowed.length === 0 || !installedNames.has(FIND_TOOL_NAME)) return config;
+    const next = {
+      ...config,
+      tools: [...config.tools, { name: FIND_TOOL_NAME }, ...allowed.map((tool) => ({ name: tool.chatName }))]
+    };
+    if (config.modelTools === void 0) {
+      const allowedNames = new Set(allowed.map((tool) => tool.chatName));
+      const loaded = [...conv.loaded].filter((name) => allowedNames.has(name));
+      if (loaded.length > 0) next.modelTools = { add: loaded.map((name) => ({ name })) };
+    }
+    return next;
+  }
+  async function verifyTurn(conversation, context) {
+    if (state.status.verified === true) return;
+    try {
+      const agent = await conversation.agent(context);
+      const names = (agent?.tools ?? []).map((tool) => tool?.name);
+      setStatus({ verified: names.includes(FIND_TOOL_NAME) });
+    } catch {
+    }
+  }
+  async function preload(conversation, input, context, originalConfigure) {
+    if (!isAutoLoadEnabled() || input?.type !== "input" || catalog.tools.length === 0) return;
+    const conv = peekConversation(conversation.id);
+    if (!conv?.access) return;
+    let text = extractText(input.content);
+    const blockRun = BLOCK_RUN_UID_RE.exec(text);
+    if (blockRun) text = String(readBlockText2(blockRun[1]) ?? "");
+    if (!text.trim()) return;
+    const picks = suggestTools(catalog, text, { access: conv.access, exclude: [...conv.loaded], max: MAX_PRELOAD }).map((tool) => tool.chatName).filter((name) => installedNames.has(name));
+    if (picks.length === 0) return;
+    rememberLoaded(conv, picks);
+    await originalConfigure.call(
+      conversation,
+      { modelTools: { add: [...conv.loaded].map((name) => ({ name })) } },
+      context
+    );
+    stats.preloads += 1;
+  }
+  const impl = {
+    onRuntime,
+    onRegistry: adoptRegistry,
+    async configure(conversation, config, context, original) {
+      let next = config;
+      try {
+        next = await augmentConfig(conversation, config, context);
+      } catch (error) {
+        warnOnce("preparing a turn failed", error);
+        next = config;
+      }
+      if (next === config) return original.call(conversation, config, context);
+      let result;
+      try {
+        result = await original.call(conversation, next, context);
+      } catch (error) {
+        warnOnce("Roam rejected the extended tool list", error);
+        return original.call(conversation, config, context);
+      }
+      void verifyTurn(conversation, context);
+      return result;
+    },
+    async submit(conversation, input, context, original, originalConfigure) {
+      try {
+        await preload(conversation, input, context, originalConfigure);
+      } catch (error) {
+        warnOnce("loading tools ahead of a turn failed", error);
+      }
+      return original.call(conversation, input, context);
+    }
+  };
+  function patchRegistryPrototype(proto) {
+    const originalInstall = proto.install;
+    const originalSnapshot = proto.snapshot;
+    if (typeof originalInstall !== "function" || typeof originalSnapshot !== "function" || typeof proto.uninstall !== "function") {
+      throw new Error("the chat registry no longer has install, snapshot and uninstall");
+    }
+    const install = function install2(extension) {
+      const result = originalInstall.call(this, extension);
+      try {
+        if (extension?.name === ROAM_EXTENSION_NAME) state.impl?.onRegistry(this);
+      } catch (error) {
+        logger.warn?.(`${LOG_PREFIX} Chat bridge: registry install hook failed`, error);
+      }
+      return result;
+    };
+    const snapshot = function snapshot2() {
+      const result = originalSnapshot.call(this);
+      try {
+        if (state.impl && !state.registries.has(this) && result?.extension?.(ROAM_EXTENSION_NAME)) {
+          state.registries.add(this);
+          const registry = this;
+          queueMicrotask(() => state.impl?.onRegistry(registry));
+        }
+      } catch (error) {
+        logger.warn?.(`${LOG_PREFIX} Chat bridge: registry snapshot hook failed`, error);
+      }
+      return result;
+    };
+    proto.install = install;
+    proto.snapshot = snapshot;
+    return { proto, originalInstall, originalSnapshot, install, snapshot };
+  }
+  function patchConversationPrototype(proto) {
+    const originalConfigure = proto.configure;
+    const originalSubmit = proto.submit;
+    if (typeof originalConfigure !== "function" || typeof originalSubmit !== "function" || typeof proto.agent !== "function") {
+      throw new Error("a chat conversation no longer has configure, submit and agent");
+    }
+    const configure = function configure2(config, context) {
+      const active = state.impl;
+      if (!active) return originalConfigure.call(this, config, context);
+      return active.configure(this, config, context, originalConfigure);
+    };
+    const submit = function submit2(input, context) {
+      const active = state.impl;
+      if (!active) return originalSubmit.call(this, input, context);
+      return active.submit(this, input, context, originalSubmit, originalConfigure);
+    };
+    proto.configure = configure;
+    proto.submit = submit;
+    return { proto, originalConfigure, originalSubmit, configure, submit };
+  }
+  async function discoverConversationPrototype(piRuntime) {
+    const durable = piRuntime.durable;
+    const context = durable.BACKGROUND_CONTEXT;
+    let harness;
+    try {
+      harness = await durable.Harness.open(
+        new durable.MemoryStorage(),
+        { models: piRuntime.createModels(), registry: durable.createRegistry(), settings: {} },
+        context
+      );
+      const conversation = await harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+      return Object.getPrototypeOf(conversation);
+    } finally {
+      if (harness && typeof harness.close === "function") {
+        try {
+          await harness.close(context);
+        } catch {
+        }
+      }
+    }
+  }
+  async function onRuntime(piRuntime) {
+    if (!attached) return;
+    const problem = checkRuntimeShape(piRuntime);
+    if (problem) {
+      fail(`Roam's chat runtime changed: ${problem}`);
+      return;
+    }
+    runtime = piRuntime;
+    try {
+      if (!state.patches) state.patches = { registry: null, conversation: null };
+      if (!state.patches.registry) {
+        state.patches.registry = patchRegistryPrototype(Object.getPrototypeOf(piRuntime.durable.createRegistry()));
+      }
+      await refresh({ force: true });
+      if (!attached) return;
+      if (!state.patches.conversation) {
+        setStatus({ phase: "starting", detail: "" });
+        const proto = await withTimeout(
+          discoverConversationPrototype(piRuntime),
+          DISCOVERY_TIMEOUT_MS,
+          "Finding the chat conversation type"
+        );
+        if (!attached) return;
+        if (!state.patches.conversation) state.patches.conversation = patchConversationPrototype(proto);
+      }
+      for (const registry of state.registries) installInto(registry);
+      if (state.status.phase !== "attached" && state.status.phase !== "failed") {
+        setStatus({ phase: "ready", detail: "" });
+      }
+    } catch (error) {
+      fail(`Roam's chat runtime changed: ${errorMessage(error)}`, error);
+    }
+  }
+  function installRuntimeTrap() {
+    if (state.trap) return true;
+    const existing = Object.getOwnPropertyDescriptor(windowRef, RUNTIME_GLOBAL);
+    if (existing && !existing.configurable) return false;
+    let held;
+    const trap = {
+      get() {
+        return held;
+      },
+      set(value) {
+        held = value;
+        state.trap = null;
+        Object.defineProperty(windowRef, RUNTIME_GLOBAL, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value
+        });
+        if (value) void state.impl?.onRuntime(value);
+      }
+    };
+    Object.defineProperty(windowRef, RUNTIME_GLOBAL, {
+      configurable: true,
+      enumerable: true,
+      get: trap.get,
+      set: trap.set
+    });
+    state.trap = trap;
+    return true;
+  }
+  function removeRuntimeTrap() {
+    const trap = state.trap;
+    if (!trap) return;
+    const existing = Object.getOwnPropertyDescriptor(windowRef, RUNTIME_GLOBAL);
+    if (existing?.set === trap.set) delete windowRef[RUNTIME_GLOBAL];
+    state.trap = null;
+  }
+  function restorePatches() {
+    const patches = state.patches;
+    if (!patches) return;
+    let clean = true;
+    const registry = patches.registry;
+    if (registry) {
+      if (registry.proto.install === registry.install && registry.proto.snapshot === registry.snapshot) {
+        registry.proto.install = registry.originalInstall;
+        registry.proto.snapshot = registry.originalSnapshot;
+        patches.registry = null;
+      } else {
+        clean = false;
+      }
+    }
+    const conversation = patches.conversation;
+    if (conversation) {
+      if (conversation.proto.configure === conversation.configure && conversation.proto.submit === conversation.submit) {
+        conversation.proto.configure = conversation.originalConfigure;
+        conversation.proto.submit = conversation.originalSubmit;
+        patches.conversation = null;
+      } else {
+        clean = false;
+      }
+    }
+    if (clean) state.patches = null;
+  }
+  return {
+    attach() {
+      if (attached) return;
+      if (!hasWindow) {
+        fail("there is no browser window to attach to");
+        return;
+      }
+      attached = true;
+      state.impl = impl;
+      const existing = windowRef[RUNTIME_GLOBAL];
+      if (existing) {
+        setStatus({ phase: "starting", detail: "", verified: false });
+        void onRuntime(existing);
+      } else if (installRuntimeTrap()) {
+        setStatus({ phase: "waiting", detail: "", verified: false });
+      } else {
+        fail("Roam's chat runtime cannot be observed in this window");
+      }
+    },
+    detach() {
+      if (!attached) return;
+      attached = false;
+      if (state.impl === impl) state.impl = null;
+      for (const registry of state.registries) {
+        try {
+          registry.uninstall({ name: CHAT_EXTENSION_NAME });
+        } catch {
+        }
+        state.installed.delete(registry);
+      }
+      installedNames = /* @__PURE__ */ new Set();
+      removeRuntimeTrap();
+      restorePatches();
+      runtime = null;
+      setStatus({ phase: "off", detail: "", verified: false });
+    },
+    /** Re-read extensions and settings and update the chat. */
+    refresh: (options) => attached ? refresh({ force: true, ...options }) : Promise.resolve(),
+    status: () => state.status,
+    get attached() {
+      return attached;
+    }
+  };
+}
+
+// src/chat-confirm.js
+var MAX_ARGS_CHARS = 2e3;
+function formatArgs(args) {
+  let text;
+  try {
+    text = JSON.stringify(args ?? {}, null, 2);
+  } catch {
+    text = String(args);
+  }
+  if (typeof text !== "string") text = String(text);
+  if (text.length <= MAX_ARGS_CHARS) return text;
+  return `${text.slice(0, MAX_ARGS_CHARS)}
+... (cut)`;
+}
+function createChatConfirm({ documentRef = globalThis.document } = {}) {
+  const queue = [];
+  let current = null;
+  let disposed = false;
+  let counter = 0;
+  function element(tag, className, text) {
+    const node = documentRef.createElement(tag);
+    if (className) node.className = className;
+    if (text !== void 0) node.textContent = text;
+    return node;
+  }
+  function settle(entry, decision) {
+    if (entry.done) return;
+    entry.done = true;
+    entry.signal?.removeEventListener?.("abort", entry.onAbort);
+    try {
+      entry.backdrop?.remove();
+    } catch {
+    }
+    if (current === entry) current = null;
+    entry.resolve(decision);
+  }
+  function finish(entry, decision) {
+    settle(entry, decision);
+    showNext();
+  }
+  function show(entry) {
+    current = entry;
+    const { request } = entry;
+    const extensionName = String(request.extensionName || "An extension");
+    const toolName = String(request.toolName || "a tool");
+    const titleId = `rth-confirm-title-${counter += 1}`;
+    const backdrop = element("div", "rth-confirm-backdrop");
+    const dialog = element("div", "bp3-dialog rth-confirm");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", titleId);
+    const header = element("div", "bp3-dialog-header");
+    const heading = element("h4", "bp3-heading", "Allow this change?");
+    heading.id = titleId;
+    header.append(heading);
+    const body = element("div", "bp3-dialog-body");
+    body.append(element("p", "", `${extensionName} wants to run ${toolName}.`));
+    if (request.description) body.append(element("p", "", String(request.description)));
+    body.append(element("pre", "", formatArgs(request.args)));
+    const footer = element("div", "bp3-dialog-footer");
+    const actions = element("div", "bp3-dialog-footer-actions");
+    const buttons = [
+      ["Deny", "bp3-button", "deny"],
+      [`Always allow ${extensionName}`, "bp3-button", "always"],
+      ["Allow once", "bp3-button bp3-intent-primary", "once"]
+    ];
+    for (const [label, className, decision] of buttons) {
+      const button = element("button", className, label);
+      button.setAttribute("type", "button");
+      button.addEventListener("click", () => finish(entry, decision));
+      actions.append(button);
+    }
+    footer.append(actions);
+    dialog.append(header, body, footer);
+    backdrop.append(dialog);
+    entry.backdrop = backdrop;
+    (documentRef.body ?? documentRef.documentElement).append(backdrop);
+  }
+  function showNext() {
+    if (current || disposed) return;
+    while (queue.length > 0) {
+      const entry = queue.shift();
+      if (entry.done) continue;
+      if (entry.signal?.aborted) {
+        settle(entry, "deny");
+        continue;
+      }
+      try {
+        show(entry);
+      } catch {
+        settle(entry, "deny");
+        continue;
+      }
+      return;
+    }
+  }
+  return {
+    confirm(request = {}) {
+      if (disposed || !documentRef?.createElement || request.signal?.aborted) {
+        return Promise.resolve("deny");
+      }
+      return new Promise((resolve) => {
+        const entry = { request, signal: request.signal, resolve, done: false, backdrop: null, onAbort: null };
+        entry.onAbort = () => finish(entry, "deny");
+        entry.signal?.addEventListener?.("abort", entry.onAbort, { once: true });
+        queue.push(entry);
+        showNext();
+      });
+    },
+    dispose() {
+      disposed = true;
+      const pending = [...current ? [current] : [], ...queue.splice(0)];
+      for (const entry of pending) {
+        entry.done = true;
+        entry.signal?.removeEventListener?.("abort", entry.onAbort);
+        try {
+          entry.backdrop?.remove();
+        } catch {
+        }
+        entry.resolve("deny");
+      }
+      current = null;
+    }
+  };
+}
+
+// src/guidelines-index.js
+var GUIDELINES_HEADING = "**Tool Hub** (Local MCP call_extension_tool only — in built-in Cmd-J chat, ignore this section and use normal Roam blocks/tables directly)";
+var PAGE_PULL_PATTERN = "[:block/uid :node/title {:block/children [:block/uid :block/string :block/order {:block/children [:block/uid :block/string :block/order]}]}]";
+var BLOCK_PULL_PATTERN = "[:block/uid :block/string {:block/page [:node/title :block/uid]} {:block/children [:block/uid :block/string :block/order]}]";
+function sortByOrder(children) {
+  if (!Array.isArray(children)) return [];
+  return [...children].sort((a, b) => (a?.[":block/order"] ?? 0) - (b?.[":block/order"] ?? 0));
+}
+function defaultRoamApiGetter() {
+  if (typeof globalThis.window !== "undefined" && globalThis.window.roamAlphaAPI) {
+    return globalThis.window.roamAlphaAPI;
+  }
+  return globalThis.roamAlphaAPI || null;
+}
+function generateUid(roamAlphaAPI) {
+  if (typeof roamAlphaAPI?.util?.generateUID === "function") {
+    return roamAlphaAPI.util.generateUID();
+  }
+  return `rth${Math.random().toString(36).slice(2, 10)}`;
+}
+function sanitizeRoamMarkup(text) {
+  let out = String(text ?? "").replace(/\s+/g, " ").replace(/`/g, "'").trim();
+  if (!out) return "";
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = out.replace(/\{\{/g, "{ {").replace(/\}\}/g, "} }").replace(/\[\[/g, "[ [").replace(/\]\]/g, "] ]").replace(/\(\(/g, "( (").replace(/\)\)/g, ") )").replace(/::/g, ":");
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/(^|[\s(])#([A-Za-z0-9_/-]+)/g, "$1`#$2`");
+}
+function pullWithReceiver(roamAlphaAPI, pattern, entity) {
+  const pull = roamAlphaAPI?.data?.pull || roamAlphaAPI?.pull;
+  if (typeof pull !== "function") return null;
+  try {
+    return pull.call(roamAlphaAPI.data || roamAlphaAPI, pattern, entity);
+  } catch {
+    return null;
+  }
+}
+function pullGuidelinesPage(roamAlphaAPI) {
+  return pullWithReceiver(roamAlphaAPI, PAGE_PULL_PATTERN, [
+    ":node/title",
+    GUIDELINES_PAGE_TITLE
+  ]);
+}
+function findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid) {
+  if (!storedUid) return null;
+  const direct = pullWithReceiver(roamAlphaAPI, BLOCK_PULL_PATTERN, [":block/uid", storedUid]);
+  if (direct?.[":block/uid"] === storedUid) {
+    const pageRef = Array.isArray(direct[":block/page"]) ? direct[":block/page"][0] : direct[":block/page"];
+    const pageTitle = pageRef?.[":node/title"];
+    const pageUid = pageRef?.[":block/uid"];
+    if (pageTitle === GUIDELINES_PAGE_TITLE || page?.[":block/uid"] && pageUid === page[":block/uid"]) {
+      return direct;
+    }
+  }
+  const topLevel = sortByOrder(page?.[":block/children"]);
+  return topLevel.find((child) => child?.[":block/uid"] === storedUid) || null;
+}
+async function withGuidelinesLock(roamAlphaAPI, fn) {
+  const locks = globalThis.navigator?.locks;
+  if (typeof locks?.request !== "function") {
+    return await fn();
+  }
+  const graphName = roamAlphaAPI?.graph?.name || "default";
+  const lockName = `roam-tool-hub:guidelines:${graphName}`;
+  return await locks.request(lockName, async () => await fn());
+}
+function buildGuidelinesIndexModel({
+  extensions = [],
+  isWriteEnabled = () => false
+} = {}) {
+  if (extensions.length === 0) {
+    return {
+      heading: GUIDELINES_HEADING,
+      children: [
+        "No extensions currently enabled in Tool Hub. Call list_extensions to check live tools."
+      ]
+    };
+  }
+  if (extensions.length <= GUIDELINES_SUMMARY_THRESHOLD) {
+    const children2 = extensions.map((ext) => {
+      const plural = ext.toolCount === 1 ? "tool" : "tools";
+      const writeState = isWriteEnabled(ext.key) ? "writes on" : "writes off";
+      const safeName = sanitizeRoamMarkup(ext.name);
+      const safeKey = sanitizeRoamMarkup(ext.key);
+      const safeSummary = sanitizeRoamMarkup(ext.summary);
+      return `**${safeName}** (\`${safeKey}\`) — ${ext.toolCount} ${plural} (${ext.readCount} read, ${ext.writeCount} write, ${writeState}): ${safeSummary}`;
+    });
+    return { heading: GUIDELINES_HEADING, children: children2 };
+  }
+  const groups = /* @__PURE__ */ new Map();
+  let totalTools = 0;
+  for (const ext of extensions) {
+    const groupName = sanitizeRoamMarkup(ext.group || "Other") || "Other";
+    if (!groups.has(groupName)) groups.set(groupName, { count: 0, tools: 0 });
+    const bucket = groups.get(groupName);
+    bucket.count += 1;
+    bucket.tools += ext.toolCount;
+    totalTools += ext.toolCount;
+  }
+  const sortedGroups = [...groups.entries()].sort(([a], [b]) => {
+    if (a === "Other" && b !== "Other") return 1;
+    if (b === "Other" && a !== "Other") return -1;
+    return a.localeCompare(b, void 0, { sensitivity: "base" });
+  });
+  const children = sortedGroups.map(([groupName, stats]) => {
+    const extWord = stats.count === 1 ? "extension" : "extensions";
+    const toolWord = stats.tools === 1 ? "tool" : "tools";
+    return `${groupName}: ${stats.count} ${extWord} (${stats.tools} ${toolWord})`;
+  });
+  children.push(
+    `Total: ${extensions.length} enabled extensions (${totalTools} tools). Call list_extensions to browse them.`
+  );
+  return { heading: GUIDELINES_HEADING, children };
+}
+async function syncGuidelinesIndex({
+  extensionAPI,
+  roamAlphaAPI = defaultRoamApiGetter(),
+  getRegistry = defaultRegistryGetter,
+  forceEnabled,
+  allowShrink = true
+} = {}) {
+  const enabled = forceEnabled !== void 0 ? Boolean(forceEnabled) : isGuidelinesIndexEnabled(extensionAPI);
+  if (!enabled) {
+    return { status: "disabled", writes: 0 };
+  }
+  if (extensionAPI?.settings?.canSet === false) {
+    return { status: "read-only-settings", writes: 0 };
+  }
+  if (!roamAlphaAPI?.data?.block || !roamAlphaAPI?.data?.page) {
+    return { status: "no-roam-api", writes: 0 };
+  }
+  return await withGuidelinesLock(roamAlphaAPI, async () => {
+    if (forceEnabled === void 0 && !isGuidelinesIndexEnabled(extensionAPI)) {
+      return { status: "disabled", writes: 0 };
+    }
+    const snapshot = readRegistrySnapshot(getRegistry);
+    const enabledExts = snapshot.extensions.filter((ext) => isExtensionEnabled(extensionAPI, ext.key));
+    const model = buildGuidelinesIndexModel({
+      extensions: enabledExts,
+      isWriteEnabled: (key) => isExtensionWriteEnabled(extensionAPI, key)
+    });
+    let page = pullGuidelinesPage(roamAlphaAPI);
+    let pageUid = page?.[":block/uid"] || null;
+    let writes = 0;
+    if (!pageUid) {
+      const candidateUid = generateUid(roamAlphaAPI);
+      try {
+        await roamAlphaAPI.data.page.create({
+          page: { title: GUIDELINES_PAGE_TITLE, uid: candidateUid }
+        });
+        writes += 1;
+      } catch {
+      }
+      page = pullGuidelinesPage(roamAlphaAPI);
+      pageUid = page?.[":block/uid"] || null;
+      if (!pageUid) {
+        return { status: "page-create-failed", writes };
+      }
+    }
+    const storedUid = getGuidelinesBlockUid(extensionAPI);
+    const existingBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
+    if (!existingBlock) {
+      if (!allowShrink && enabledExts.length === 0) {
+        return { status: "deferred-empty-boot", writes: 0 };
+      }
+      const parentUid = generateUid(roamAlphaAPI);
+      await roamAlphaAPI.data.block.create({
+        location: { "parent-uid": pageUid, order: "last" },
+        block: { uid: parentUid, string: model.heading }
+      });
+      writes += 1;
+      await setGuidelinesBlockUid(extensionAPI, parentUid);
+      for (let i = 0; i < model.children.length; i += 1) {
+        await roamAlphaAPI.data.block.create({
+          location: { "parent-uid": parentUid, order: i },
+          block: { uid: generateUid(roamAlphaAPI), string: model.children[i] }
+        });
+        writes += 1;
+      }
+      return { status: "created", uid: parentUid, writes };
+    }
+    const existingChildren = sortByOrder(existingBlock[":block/children"]);
+    if (!allowShrink && (enabledExts.length === 0 || model.children.length < existingChildren.length)) {
+      return { status: "preserved-on-boot", uid: storedUid, writes: 0 };
+    }
+    const headingMatches = existingBlock[":block/string"] === model.heading;
+    const childrenMatch = existingChildren.length === model.children.length && existingChildren.every((child, index) => child?.[":block/string"] === model.children[index]);
+    if (headingMatches && childrenMatch) {
+      return { status: "unchanged", uid: storedUid, writes: 0 };
+    }
+    if (!headingMatches) {
+      await roamAlphaAPI.data.block.update({
+        block: { uid: storedUid, string: model.heading }
+      });
+      writes += 1;
+    }
+    const sharedCount = Math.min(existingChildren.length, model.children.length);
+    for (let i = 0; i < sharedCount; i += 1) {
+      if (existingChildren[i]?.[":block/string"] !== model.children[i]) {
+        await roamAlphaAPI.data.block.update({
+          block: { uid: existingChildren[i][":block/uid"], string: model.children[i] }
+        });
+        writes += 1;
+      }
+    }
+    for (let i = existingChildren.length; i < model.children.length; i += 1) {
+      await roamAlphaAPI.data.block.create({
+        location: { "parent-uid": storedUid, order: i },
+        block: { uid: generateUid(roamAlphaAPI), string: model.children[i] }
+      });
+      writes += 1;
+    }
+    for (let i = existingChildren.length - 1; i >= model.children.length; i -= 1) {
+      await roamAlphaAPI.data.block.delete({
+        block: { uid: existingChildren[i][":block/uid"] }
+      });
+      writes += 1;
+    }
+    return { status: "updated", uid: storedUid, writes };
+  });
+}
+async function removeGuidelinesIndex({
+  extensionAPI,
+  roamAlphaAPI = defaultRoamApiGetter()
+} = {}) {
+  if (extensionAPI?.settings?.canSet === false) {
+    return { status: "read-only-settings", deleted: false };
+  }
+  if (!roamAlphaAPI?.data?.block) {
+    return { status: "no-roam-api", deleted: false };
+  }
+  return await withGuidelinesLock(roamAlphaAPI, async () => {
+    const storedUid = getGuidelinesBlockUid(extensionAPI);
+    if (!storedUid) {
+      return { status: "not-found", deleted: false };
+    }
+    const page = pullGuidelinesPage(roamAlphaAPI);
+    const ownedBlock = findOwnedBlockOnGuidelinesPage(roamAlphaAPI, page, storedUid);
+    if (ownedBlock) {
+      await roamAlphaAPI.data.block.delete({
+        block: { uid: storedUid }
+      });
+    }
+    await setGuidelinesBlockUid(extensionAPI, null);
+    return {
+      status: ownedBlock ? "removed" : "cleared-stale-uid",
+      uid: storedUid,
+      deleted: Boolean(ownedBlock)
+    };
+  });
+}
+
 // src/lifecycle.js
 function isPromiseLike(value) {
   return value != null && typeof value.then === "function";
@@ -1198,6 +2693,7 @@ function snapshotSignature(snapshot) {
     ext.version || "",
     ext.group || "",
     ext.summary,
+    ext.guide || "",
     ext.toolCount,
     ext.readCount,
     ext.writeCount,
@@ -1212,6 +2708,29 @@ function setRuntimeVersion(version, lifecycle) {
       delete globalThis.window[RUNTIME_VERSION_KEY];
     }
   });
+}
+function roamAi() {
+  return globalThis.window?.roamAlphaAPI?.data?.ai;
+}
+async function getNativeTools() {
+  try {
+    const guidelines = await roamAi()?.getGraphGuidelines?.();
+    return Array.isArray(guidelines?.extensionTools) ? guidelines.extensionTools : [];
+  } catch {
+    return [];
+  }
+}
+function readBlockText(uid) {
+  try {
+    const pull = globalThis.window?.roamAlphaAPI?.pull;
+    if (typeof pull !== "function") return "";
+    const block = pull("[:block/string {:block/children [:block/string]}]", [":block/uid", uid]);
+    if (!block) return "";
+    const lines = [block[":block/string"], ...(block[":block/children"] ?? []).map((child) => child?.[":block/string"])];
+    return lines.filter((line) => typeof line === "string" && line).join("\n");
+  } catch {
+    return "";
+  }
 }
 async function onload({ extensionAPI, extension } = {}) {
   if (!extensionAPI) throw new TypeError("Roam did not provide extensionAPI");
@@ -1269,11 +2788,25 @@ async function onload({ extensionAPI, extension } = {}) {
     };
     const handleToggleExtension = async (extKey, field, checked) => {
       if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
-      const settingId = field === "write" ? extensionWriteSettingId(extKey) : extensionEnabledSettingId(extKey);
+      const settingId = field === "write" ? extensionWriteSettingId(extKey) : field === "chatAuto" ? extensionChatAutoSettingId(extKey) : extensionEnabledSettingId(extKey);
       await extensionAPI.settings.set(settingId, checked);
-      if (isGuidelinesIndexEnabled(extensionAPI)) {
+      if (field !== "chatAuto" && isGuidelinesIndexEnabled(extensionAPI)) {
         await scheduleGuidelinesReconcile({ allowShrink: true });
       }
+      await bridge.refresh().catch((error) => {
+        console.warn(`${LOG_PREFIX} Chat bridge refresh failed`, error);
+      });
+    };
+    const handleToggleChatBridge = async (checked) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
+      await extensionAPI.settings.set(SETTING_IDS.chatBridgeEnabled, checked);
+      if (checked) bridge.attach();
+      else bridge.detach();
+      await refreshSettingsPanel();
+    };
+    const handleToggleChatAutoLoad = async (checked) => {
+      if (lifecycle.disposed || extensionAPI.settings?.canSet === false) return;
+      await extensionAPI.settings.set(SETTING_IDS.chatAutoLoad, checked);
     };
     const refreshSettingsPanel = async ({ syncGuidelines = false, allowShrink = true } = {}) => {
       if (lifecycle.disposed) return;
@@ -1287,16 +2820,26 @@ async function onload({ extensionAPI, extension } = {}) {
         do {
           panelDirty = false;
           const snapshot = readRegistrySnapshot(defaultRegistryGetter);
-          await seedExtensionDefaults(extensionAPI, snapshot.extensions);
+          let nativeExtensions = [];
+          try {
+            nativeExtensions = readNativeExtensions(await getNativeTools());
+          } catch {
+            nativeExtensions = [];
+          }
+          await seedExtensionDefaults(extensionAPI, [...snapshot.extensions, ...nativeExtensions]);
           if (lifecycle.disposed) return;
           lastSignature = snapshotSignature(snapshot);
           await lifecycle.settingsPanel(
             extensionAPI,
             createSettingsPanel({
               extensions: snapshot.extensions,
+              nativeExtensions,
+              chatStatus: bridge.status(),
               onRefresh: () => refreshSettingsPanel({ syncGuidelines: true, allowShrink: true }),
               onToggleExtension: handleToggleExtension,
-              onToggleGuidelines: handleToggleGuidelines
+              onToggleGuidelines: handleToggleGuidelines,
+              onToggleChatBridge: handleToggleChatBridge,
+              onToggleChatAutoLoad: handleToggleChatAutoLoad
             })
           );
         } while (panelDirty && !lifecycle.disposed);
@@ -1321,9 +2864,37 @@ async function onload({ extensionAPI, extension } = {}) {
       getRegistry: defaultRegistryGetter,
       onSnapshot
     });
+    const runTool = tools.find((tool) => tool.name === "run_tool");
+    const confirm = createChatConfirm();
+    let lastStatusText = describeChatBridgeStatus({ phase: "off" });
+    const bridge = createChatBridge({
+      extensionAPI,
+      getRegistrySnapshot: () => readRegistrySnapshot(defaultRegistryGetter),
+      getNativeTools,
+      callNativeTool: (id, args) => roamAi().callExtensionTool({ tool: id, args }),
+      runRegistryTool: (id, args) => runTool.handler({ tool: id, args }, {}),
+      confirmWrite: (request) => confirm.confirm(request),
+      isAutoLoadEnabled: () => isChatAutoLoadEnabled(extensionAPI),
+      isChatAutoApproved: (extKey) => isChatAutoApproved(extensionAPI, extKey),
+      setChatAutoApproved: (extKey, value) => setChatAutoApproved(extensionAPI, extKey, value),
+      readBlockText,
+      onStatus: (status) => {
+        const text = describeChatBridgeStatus(status);
+        if (text === lastStatusText || lifecycle.disposed) return;
+        lastStatusText = text;
+        void refreshSettingsPanel().catch((error) => {
+          console.warn(`${LOG_PREFIX} Settings panel refresh failed`, error);
+        });
+      }
+    });
+    lifecycle.add(() => {
+      bridge.detach();
+      confirm.dispose();
+    });
     await refreshSettingsPanel({ syncGuidelines: true, allowShrink: false });
     if (lifecycle.disposed) return async () => {
     };
+    if (isChatBridgeEnabled(extensionAPI)) bridge.attach();
     const unregisterTools = registerHubTools(extensionAPI, tools);
     lifecycle.add(unregisterTools);
     if (extensionAPI.ui?.commandPalette) {
@@ -1331,6 +2902,9 @@ async function onload({ extensionAPI, extension } = {}) {
         label: "Tool Hub: Refresh registry & settings",
         callback: () => {
           void refreshSettingsPanel({ syncGuidelines: true, allowShrink: true });
+          void bridge.refresh().catch((error) => {
+            console.warn(`${LOG_PREFIX} Chat bridge refresh failed`, error);
+          });
         }
       });
       if (lifecycle.disposed) return async () => {
